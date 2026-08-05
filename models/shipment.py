@@ -471,8 +471,6 @@ class mercadolibre_shipment(models.Model):
     receiver_street_number = fields.Char('Nro')
     receiver_city = fields.Char('Ciudad')
     receiver_city_code = fields.Char(string='Codigo Ciudad')
-    receiver_neighborhood = fields.Char('Barrio')
-    receiver_municipality = fields.Char('Municipio')
     receiver_state = fields.Char('Estado')
     receiver_state_code = fields.Char('Estado ID')
     receiver_state_id = fields.Many2one('res.country.state',string='State')
@@ -904,23 +902,8 @@ class mercadolibre_shipment(models.Model):
             # envío = received_amount - total de producto (= envío neto del cupón). Si el
             # cupón cubre TODO el envío (residual <= 0) -> 0, que es lo correcto (bonificado).
             # Solo se toca cuando hay cupón; sin cupón el residual == envío bruto (sin cambio).
-            # FIX #399 (opción B): si el comprador paga el flete ENTERO
-            # (shipping_seller_cost==0 y hay shipping_cost/receiver/payments_shipment_amount),
-            # NO imputar el cupón al envío — la línea de envío debe quedar con el flete REAL
-            # (del_price ya calculado arriba). En ese caso el cupón se imputa al PRODUCTO en
-            # orders.py (mismo criterio _buyer_pays_full_shipping). Si el VENDEDOR paga el
-            # flete (shipping_seller_cost>0), se mantiene el comportamiento anterior.
-            _buyer_pays_full_shipping = (not shipment.shipping_seller_cost) and (
-                order.payments_shipment_amount
-                or shipment.shipping_receiver_cost
-                or shipment.shipping_cost
-            )
             _coupon = abs(sorder.meli_coupon_amount or 0.0)
-            # El cupón solo se ABSORBE en la línea de ENVÍO en modo 'product_discount' (flag ON
-            # histórico). En 'full' (made-whole, factura a precio pleno — #433) y en
-            # 'separate_line' la línea de envío queda con el flete REAL.
-            _coupon_mode_ship = meli_resolve_coupon_invoice_mode(config)
-            if _coupon_mode_ship == 'product_discount' and _coupon > 0.0 and received_amount and received_amount > 0 and not _buyer_pays_full_shipping:
+            if _coupon > 0.0 and received_amount and received_amount > 0:
                 _dline_total = sum(l.price_total for l in sorder.order_line if l.is_delivery)
                 _product_total = sorder.amount_total - _dline_total
                 _ship_residual = received_amount - _product_total
@@ -1441,10 +1424,7 @@ class mercadolibre_shipment(models.Model):
                         "receiver_country_code": ship_json["receiver_address"]["country"]["id"],
                         "receiver_latitude": ship_json["receiver_address"]["latitude"],
                         "receiver_longitude": ship_json["receiver_address"]["longitude"],
-                        "receiver_zip_code": (("zip_code" in ship_json["receiver_address"]) and ship_json["receiver_address"]["zip_code"]) or False,
-                        # Barrio / municipio del receiver (pueden venir como dict {id,name} o ausentes)
-                        "receiver_neighborhood": ((ship_json["receiver_address"].get("neighborhood") or {}).get("name")) or False,
-                        "receiver_municipality": ((ship_json["receiver_address"].get("municipality") or {}).get("name")) or False
+                        "receiver_zip_code": (("zip_code" in ship_json["receiver_address"]) and ship_json["receiver_address"]["zip_code"]) or False
                     })
                     receiver_phone = ("receiver_phone" in ship_json["receiver_address"] and ship_json["receiver_address"]["receiver_phone"] and not "XXXX" in ship_json["receiver_address"]["receiver_phone"] and ship_json["receiver_address"]["receiver_phone"])
                     if receiver_phone:

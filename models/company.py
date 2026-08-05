@@ -182,11 +182,6 @@ class res_company(models.Model):
         return "MLA"
 
     def get_meli_state( self ):
-        if self.env['meli.util']._meli_is_neutralized():
-            # Cron "Get Meli State" en DB neutralizada: no-op. No leer ni refrescar,
-            # para no arriesgar la rotación del token de PRODUCCIÓN.
-            self.env['meli.util']._meli_log_neutralized_skip()
-            return
         # recoger el estado y devolver True o False (meli)
         #False if logged ok
         #True if need login
@@ -317,19 +312,6 @@ class res_company(models.Model):
             #_logger.info("company.mercadolibre_cron_get_questions")
             self.meli_query_get_questions()
 
-    def cron_meli_orders_status(self):
-        #_logger.info('company cron_meli_orders_status() ')
-
-        company = self.env.user.company_id
-
-        apistate = self.env['meli.util'].get_new_instance(company)
-        if apistate.needlogin_state:
-            return True
-
-        if (company.mercadolibre_cron_get_orders_status):
-            #_logger.info("company.mercadolibre_cron_get_orders_status")
-            self.env['mercadolibre.orders'].orders_resync_status(meli=apistate, config=company)
-
     mercadolibre_client_id = fields.Char(string='App Id', help='Client ID para ingresar a MercadoLibre',size=128)
     mercadolibre_secret_key = fields.Char(string='Secret Key', help='Secret Key para ingresar a MercadoLibre',size=128)
     mercadolibre_redirect_uri = fields.Char( string='Redirect Uri', help='Redirect uri (https://yourserver.yourdomain.com/meli_login)',size=1024)
@@ -365,9 +347,6 @@ class res_company(models.Model):
     mercadolibre_cron_get_orders_shipment = fields.Boolean(string='Importar envíos',help='Cron Get Orders Shipment')
     mercadolibre_cron_get_orders_shipment_client = fields.Boolean(string='Importar clientes',help='Cron Get Orders Shipment Client')
     mercadolibre_cron_get_orders_client_set_company = fields.Boolean(string='Asociar Empresa',help='Asociar el cliente siempre a la empresa de la cuenta',default=True)
-    mercadolibre_cron_get_orders_status = fields.Boolean(string='Re-sincronizar estado de pedidos',help='#475 Cron dedicado: re-consulta por ID a MercadoLibre los pedidos abiertos recientes y refleja cancelaciones/cambios de estado que la ventana date_desc del cron de importacion no alcanza.',default=True)
-    mercadolibre_cron_orders_status_days = fields.Integer(string='Dias re-sync de estado',help='Ventana en dias hacia atras (por fecha de creacion) de pedidos abiertos a re-consultar en el cron de re-sync de estado.',default=7)
-    mercadolibre_cron_orders_status_limit = fields.Integer(string='Max pedidos por ciclo (re-sync estado)',help='Tope de pedidos a re-consultar por ciclo del cron de re-sync de estado, para acotar el uso de API (rate-limit).',default=100)
     mercadolibre_cron_get_questions = fields.Boolean(string='Importar preguntas',help='Cron Get Questions')
     mercadolibre_cron_get_update_products = fields.Boolean(string='Actualizar productos en Odoo',help='Cron Update Products already imported')
     mercadolibre_cron_post_update_products = fields.Boolean(string='Actualizar productos en ML',help='Cron Update Posted Products, Product Templates or Variants with Meli Publication field checked')
@@ -524,7 +503,7 @@ class res_company(models.Model):
 
     mercadolibre_billing_force_on_main = fields.Boolean(
         string="Datos fiscales SIEMPRE en el contacto principal (no separar)",
-        default=True,
+        default=False,
         help="ESTRATEGIA B: asigna los datos de facturación (razón social, CUIT/VAT, tipo doc, "
              "posición fiscal) directamente al contacto principal del comprador y corrige su "
              "nombre al legal, aunque el nickname de MercadoLibre no coincida con la razón social. "
@@ -1663,32 +1642,6 @@ class res_company(models.Model):
 
         return {}
 
-    def _meli_diag_persist_ml_status(self, pid, meli_id, ml_status, ml_qty):
-        """26.87 (F3): guarda el estado/cantidad que ML acaba de devolver.
-
-        Se escribe por SQL (no ORM) a proposito: esto corre dentro del loop del
-        diagnostico, sobre hasta 100 items por corrida, y no queremos disparar
-        recomputos de campos calculados ni invalidaciones caras por item. Es
-        defensivo de punta a punta: si el modelo de bindings no esta instalado
-        (meli_oerp solo, sin meli_oerp_multiple) o la escritura falla, el
-        diagnostico sigue — nunca puede romper el cron por un dato de telemetria.
-        """
-        if ml_status not in ('active', 'paused', 'closed', 'under_review', 'inactive'):
-            return
-        try:
-            if 'mercadolibre.product' in self.env and meli_id:
-                self.env.cr.execute("""
-                    UPDATE mercadolibre_product
-                    SET meli_last_status = %s
-                    WHERE conn_id = %s
-                      AND (meli_last_status IS DISTINCT FROM %s)
-                """, (ml_status, meli_id, ml_status))
-                if self.env.cr.rowcount:
-                    self.env['mercadolibre.product'].invalidate_model(['meli_last_status'])
-        except Exception as _st_err:
-            _logger.debug("MELI_STOCK_DIAG: no se pudo persistir meli_last_status de %s: %s",
-                          meli_id, _st_err)
-
     def meli_stock_diagnostic(self, meli=False):
         """
         Diagnostic safety check: compare Odoo stock vs ML stock for all published products.
@@ -1854,17 +1807,6 @@ class res_company(models.Model):
                     ml_user_product_id = rjson.get('user_product_id')
                     # fulfillment_user_product_id: logistic_type='fulfillment' AND user_product_id set
                     is_fulfillment_user = bool(ml_user_product_id and ml_logistic == 'fulfillment')
-
-                    # 26.87 (F3): PERSISTIR el estado que acabamos de leer de ML.
-                    # Antes se leia, se logueaba y se tiraba. Como meli_last_status
-                    # solo se refresca en el push de stock, y las publicaciones que
-                    # nunca entran a la cola nunca se pushean, el campo se quedaba
-                    # congelado por meses: en una cuenta real habia 994 marcadas
-                    # 'paused' que en ML estaban ACTIVAS. Eso ensucia este mismo
-                    # diagnostico (falsos "pausadas con stock = perdida de ventas")
-                    # y quema ~100 llamadas API cada 30 min sobre items sanos.
-                    # Costo: 0 llamadas extra — la respuesta ya la tenemos en la mano.
-                    self._meli_diag_persist_ml_status(pid, meli_id, ml_status, ml_qty)
 
                     if ml_status == 'paused' and odoo_qty > 0:
                         # Skip only pure ML-managed fulfillment (no user_product_id — ML controls stock)

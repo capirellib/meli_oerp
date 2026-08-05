@@ -57,3 +57,11 @@ target/
 # .roots siempre versionado (forest) — no editar a mano
 !.roots/
 !.roots/**
+
+# macOS
+.DS_Store
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp

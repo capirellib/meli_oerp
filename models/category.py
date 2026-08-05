@@ -321,14 +321,7 @@ class mercadolibre_category(models.Model):
         db_name = self.env.cr.dbname
         cache_key = (db_name, category_id)
         if cache_key in _CATEGORY_CACHE:
-            cached_mlcatid, cached_www_cat_id = _CATEGORY_CACHE[cache_key]
-            # Validar que el id de mercadolibre.category cacheado siga existiendo.
-            # Un id puede quedar huerfano en el cache si la transaccion que creo la
-            # categoria hizo rollback (InFailedSqlTransaction): devolverlo provocaria
-            # un FK violation al escribir meli_category. Si no existe, descartar y recomputar.
-            if not cached_mlcatid or self.env['mercadolibre.category'].browse(cached_mlcatid).exists():
-                return cached_mlcatid, cached_www_cat_id
-            del _CATEGORY_CACHE[cache_key]
+            return _CATEGORY_CACHE[cache_key]
 
         if not meli:
             meli = self.get_meli(meli=meli)
@@ -356,11 +349,8 @@ class mercadolibre_category(models.Model):
                     cat_fields['public_category_id'] = www_cat_id
                     cat_fields['public_category'] = p_cat_id.id
 
-        # Guardar en cache solo lookups exitosos (mlcatid real). Cachear un mlcatid
-        # vacio (login pendiente / categoria inexistente en ML / fallo transitorio)
-        # envenenaria llamadas posteriores que devolverian False sin reintentar.
-        if mlcatid:
-            _CATEGORY_CACHE[cache_key] = (mlcatid, www_cat_id)
+        # Guardar en cache para próximas llamadas con la misma categoría
+        _CATEGORY_CACHE[cache_key] = (mlcatid, www_cat_id)
 
         return mlcatid, www_cat_id
 
@@ -519,7 +509,7 @@ class mercadolibre_category(models.Model):
                 except:
                     _logger.error("No se pudo importar: "+ str(obj.meli_father_category_id))
 
-    def import_category(self, category_id, meli=None, create_missing_website=False, predict_only=False ):
+    def import_category(self, category_id, meli=None, create_missing_website=False ):
 
        #_logger.info("Import Category "+str(category_id))
         company = self.env.user.company_id
@@ -536,37 +526,6 @@ class mercadolibre_category(models.Model):
         create_missing_website = create_missing_website or config.mercadolibre_create_website_categories
         ml_cat_id = None
         www_cat_id = None
-
-        # FIX #532 (perf): camino LIVIANO para PREDICCIÓN/sugerencia de categorías. Para mostrar
-        # las opciones en el wizard alcanza id + nombre: NO importamos atributos (_get_attributes),
-        # ni grid charts (get_search_chart_filters), ni catalog_domain_json, ni la categoría web.
-        # Todo eso se difiere a la SELECCIÓN/publicación (apply_category hace un import completo de
-        # la elegida; el pre-flight de atributos consulta la API por su cuenta). Además, si la
-        # categoría YA existe en la DB, short-circuit total (0 llamadas a la API de ML).
-        if predict_only and category_id:
-            existing = category_obj.search([('meli_category_id','=',str(category_id))], limit=1)
-            if existing:
-                return existing
-            try:
-                response_cat = meli.get("/categories/"+str(category_id), {'access_token':meli.access_token})
-                rjson_cat = response_cat.json()
-            except Exception:
-                _logger.exception("import_category(predict_only): fallo GET /categories/%s", category_id)
-                return category_obj
-            is_branch = ("children_categories" in rjson_cat and len(rjson_cat["children_categories"])>0)
-            fullname = ""
-            if ("path_from_root" in rjson_cat):
-                for path in rjson_cat["path_from_root"]:
-                    fullname = fullname + "/" + path["name"]
-            if not fullname:
-                fullname = rjson_cat.get("name","") or str(category_id)
-            return category_obj.create({
-                'name': fullname,
-                'meli_category_id': ''+str(category_id),
-                'is_branch': is_branch,
-                'data_json': json.dumps(rjson_cat),
-            })
-
         if (category_id):
             is_branch = False
             father = None
@@ -612,20 +571,8 @@ class mercadolibre_category(models.Model):
                 #_logger.info(cat_fields)
                 ml_cat_id = ml_cat_id.create((cat_fields))
                 if (ml_cat_id.id and is_branch==False):
-                  # [solsun-local->source] Savepoints: los except desnudos de _get_attributes /
-                  # get_search_chart_filters se tragan errores SQL y dejan la transaccion PG
-                  # abortada; sin savepoint el CREATE de la categoria se iba en el rollback pero
-                  # el id ya estaba cacheado -> FK violation posterior en meli_category (#410 BUG 3).
-                  try:
-                      with self.env.cr.savepoint():
-                          ml_cat_id._get_attributes(meli=meli)
-                  except Exception as e:
-                      _logger.error("_get_attributes failed for category %s: %s", category_id, e, exc_info=True)
-                  try:
-                      with self.env.cr.savepoint():
-                          ml_cat_id.get_search_chart_filters(meli=meli)
-                  except Exception as e:
-                      _logger.error("get_search_chart_filters failed for category %s: %s", category_id, e, exc_info=True)
+                  ml_cat_id._get_attributes(meli=meli)
+                  ml_cat_id.get_search_chart_filters(meli=meli)
 
             if (ml_cat_id):
                #_logger.info("MercadoLibre Category Ok: "+str(ml_cat_id)+" www_cats:"+str(www_cats))
@@ -659,17 +606,8 @@ class mercadolibre_category(models.Model):
                 ml_cat_id.write((cat_fields))
 
                 if (ml_cat_id.id and is_branch==False):
-                  # [solsun-local->source] Savepoints (2o call-site, camino write): idem create.
-                  try:
-                      with self.env.cr.savepoint():
-                          ml_cat_id._get_attributes()
-                  except Exception as e:
-                      _logger.error("_get_attributes failed for category %s: %s", category_id, e, exc_info=True)
-                  try:
-                      with self.env.cr.savepoint():
-                          ml_cat_id.get_search_chart_filters(meli=meli)
-                  except Exception as e:
-                      _logger.error("get_search_chart_filters failed for category %s: %s", category_id, e, exc_info=True)
+                  ml_cat_id._get_attributes()
+                  ml_cat_id.get_search_chart_filters(meli=meli)
 
             if not www_cat_id and create_missing_website and 'product.public.category' in self.env:
                 #_logger.info("Ecommerce category missing")

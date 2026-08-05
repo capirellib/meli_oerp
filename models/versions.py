@@ -7,7 +7,7 @@ import logging
 _logger = logging.getLogger(__name__)
 import json
 import re
-from markupsafe import Markup, escape as markup_escape
+from markupsafe import Markup
 # Odoo version 19.0
 
 # Odoo 18.0 -> type='json', Odoo 19.0 -> type='jsonrpc'
@@ -117,57 +117,11 @@ cl_vat_sep_million = "."
 order_message_type = "notification"
 product_message_type = "notification"
 
-def meli_once_marker(once_key):
-    """Marca HTML invisible que identifica un mensaje "postear una sola vez"."""
-    return "<!-- meli-once:%s -->" % once_key
-
-
-def meli_message_already_posted(record, once_key):
-    """True si el chatter de `record` ya tiene el mensaje marcado con `once_key`."""
-    if not record or not once_key:
-        return False
-    try:
-        # sudo: el cron corre con un usuario de permisos acotados y esto es sólo lectura.
-        return bool(record.env['mail.message'].sudo().search_count([
-            ('model', '=', record._name),
-            ('res_id', '=', record.id),
-            ('body', 'like', meli_once_marker(once_key)),
-        ]))
-    except Exception as e:
-        # Ante cualquier problema leyendo el chatter preferimos postear de más
-        # (perder un aviso es peor que repetirlo).
-        _logger.warning("meli_message_already_posted failed on %s(%s): %s", record._name, record.id, e)
-        return False
-
-
-def meli_message_body_with_marker(body, once_key):
-    """Devuelve `body` con la marca `once_key` pegada al final, invisible en el chatter.
-
-    Ojo con la diferencia entre versiones de Odoo (verificada en el core):
-      - 16.0: `message_post` NO escapa el body → un str plano se guarda como HTML.
-      - 17.0/18.0/19.0: `message_post` hace `escape(body)` salvo que sea `Markup`
-        (mail_thread.py: "escape if text, keep if markup") → un comentario HTML
-        en un str plano se vería literal, `<!-- meli-once:... -->`, en el chatter.
-    Por eso devolvemos un `Markup` con el body YA escapado + la marca cruda: el texto
-    se ve igual que siempre en las 4 versiones y la marca queda invisible.
-    Sólo se usa en los avisos con `once_key` (los demás callers no cambian).
-    """
-    return markup_escape(body) + Markup(meli_once_marker(once_key))
-
-
-def meli_message_post(record, body, config=None, once_key=None):
+def meli_message_post(record, body, config=None):
     """Post a message respecting the MeLi notification mode setting.
 
     config: res.company or connection_account record with mercadolibre_notification_mode field.
            If None, falls back to the record's company.
-
-    once_key: si viene, el mensaje se postea UNA SOLA VEZ por record. El body se
-           marca con `<!-- meli-once:<once_key> -->` y en las llamadas siguientes,
-           si esa marca ya está en el chatter, no se repostea (sí queda en el log).
-           Se usa en los avisos que nacen de un cron que reintenta indefinidamente
-           (orden ML cancelada que no se puede cancelar en Odoo): sin esto el mismo
-           aviso se repetía cada ~5 min para siempre — visto en prod con 1215 y 832
-           mensajes en el chatter de dos órdenes.
 
     Modes:
       - 'notification': standard notification (appears in user inbox)
@@ -186,18 +140,8 @@ def meli_message_post(record, body, config=None, once_key=None):
         _logger.info("MELI [%s] %s: %s", record._name, getattr(record, 'name', record.id), body)
         return
 
-    if once_key:
-        if meli_message_already_posted(record, once_key):
-            _logger.info("MELI [%s] %s (ya posteado, once_key=%s): %s",
-                         record._name, getattr(record, 'name', record.id), once_key, body)
-            return
-        body = meli_message_body_with_marker(body, once_key)
-
     body_val = body
-    if isinstance(body_val, Markup):
-        # Ya viene armado por once_key (body escapado + marca cruda): no tocarlo.
-        pass
-    elif isinstance(body_val, str) and '<' in body_val and '>' in body_val:
+    if isinstance(body_val, str) and '<' in body_val and '>' in body_val:
         body_val = Markup(body_val)
     else:
         body_val = str(body_val)
@@ -613,123 +557,6 @@ def get_inventory_fields( product, warehouse, quantity=0 ):
             #"name": "INV: "+ product.name
             }
 
-COUPON_DISCOUNT_CODE = "MELI_COUPON_DISC"
-
-
-def meli_resolve_coupon_invoice_mode(config):
-    """Modo de facturacion del cupon ML (tri-estado). Devuelve 'full'|'product_discount'|'separate_line'.
-
-      - full (default): factura a precio pleno; el cupon ML (reembolsado por ML, vendedor
-        made-whole) NO se refleja en lineas. [caso #433 Elvimarta]
-      - product_discount: el cupon se imputa como descuento (%) sobre las lineas de PRODUCTO.
-      - separate_line: el cupon se imputa como linea(s) de descuento separada(s), una por grupo
-        de impuesto (prorrateo), sin tocar producto ni envio. OPT-IN (riesgos AFIP/CL).
-
-    Campo nuevo: meli_coupon_invoice_mode (meli_oerp_multiple / meli_oerp_accounting).
-    Compat: si solo existe el booleano obsoleto meli_coupon_discount_on_invoice,
-            True -> 'product_discount', False -> 'full'.
-    """
-    if not config:
-        return "full"
-    if "meli_coupon_invoice_mode" in config._fields and config.meli_coupon_invoice_mode:
-        return config.meli_coupon_invoice_mode
-    if "meli_coupon_discount_on_invoice" in config._fields:
-        return "product_discount" if config.meli_coupon_discount_on_invoice else "full"
-    return "full"
-
-
-def _meli_line_tax_field(rec):
-    return "tax_ids" if "tax_ids" in rec._fields else "tax_id"
-
-
-def meli_get_coupon_discount_product(env):
-    Product = env["product.product"].sudo()
-    prod = Product.search([("default_code", "=", COUPON_DISCOUNT_CODE)], limit=1)
-    if not prod:
-        try:
-            prod = Product.create({
-                "name": "Descuento cupon MercadoLibre",
-                "default_code": COUPON_DISCOUNT_CODE,
-                "type": "service",
-                "sale_ok": True,
-                "purchase_ok": False,
-                "taxes_id": [(5, 0, 0)],
-            })
-        except Exception as E:
-            _logger.info("MELI: could not create coupon discount product: %s", str(E))
-            prod = None
-    return prod
-
-
-def meli_remove_coupon_separate_line(sorder):
-    """Elimina la(s) linea(s) de descuento de cupon separada(s) si existieran."""
-    try:
-        if sorder.state in ("done",) or ("locked" in sorder._fields and sorder.locked):
-            return
-        prod = sorder.env["product.product"].sudo().search(
-            [("default_code", "=", COUPON_DISCOUNT_CODE)], limit=1)
-        if not prod:
-            return
-        lines = sorder.order_line.filtered(lambda l: l.product_id.id == prod.id)
-        if lines:
-            lines.unlink()
-    except Exception as E:
-        _logger.info("MELI: remove coupon separate line failed: %s", str(E))
-
-
-def meli_apply_coupon_separate_line(sorder, coupon_amount):
-    """OPT-IN: imputa el cupon ML como linea(s) de descuento separada(s), UNA POR GRUPO DE
-    IMPUESTO (prorrateo sobre el bruto con IVA), sin tocar precio de producto ni de envio.
-    RIESGOS AFIP/CL: una linea de monto negativo puede ser rechazada por validaciones de FE
-    electronica; VALIDAR contra meli_oerp_accounting_afip antes de habilitar. No es el default.
-    El total facturado sigue == (bruto - coupon_amount)."""
-    try:
-        if sorder.state in ("done",) or ("locked" in sorder._fields and sorder.locked):
-            return
-        coupon_amount = abs(coupon_amount or 0.0)
-        meli_remove_coupon_separate_line(sorder)
-        if coupon_amount <= 0.0:
-            return
-        prod = meli_get_coupon_discount_product(sorder.env)
-        if not prod:
-            return
-        non_disc_lines = sorder.order_line.filtered(
-            lambda l: not l.is_delivery and l.product_id.id != prod.id)
-        groups = {}
-        total_gross = 0.0
-        for line in non_disc_lines:
-            taxes = line[_meli_line_tax_field(line)]
-            tax_pct = sum(t.amount for t in taxes
-                          if t.amount_type == "percent" and not t.price_include)
-            gross = line.price_unit * line.product_uom_qty * (1.0 + tax_pct / 100.0)
-            key = tuple(sorted(taxes.ids))
-            g = groups.setdefault(key, {"gross": 0.0, "taxes": taxes, "tax_pct": tax_pct})
-            g["gross"] += gross
-            total_gross += gross
-        if total_gross <= 0.0:
-            return
-        SOL = sorder.env["sale.order.line"]
-        tfield = "tax_ids" if "tax_ids" in SOL._fields else "tax_id"
-        for key, g in groups.items():
-            share_gross = coupon_amount * (g["gross"] / total_gross)
-            if share_gross <= 0.0:
-                continue
-            price_net = -(share_gross / (1.0 + g["tax_pct"] / 100.0))
-            SOL.create({
-                "order_id": sorder.id,
-                "product_id": prod.id,
-                "name": "Descuento cupon MercadoLibre",
-                "product_uom_qty": 1.0,
-                "price_unit": price_net,
-                "discount": 0.0,
-                tfield: [(6, 0, list(g["taxes"].ids))],
-            })
-        _logger.info("MELI: applied coupon as %d separate discount line(s), total=%.2f on SO %s",
-                     len(groups), coupon_amount, sorder.name)
-    except Exception as E:
-        _logger.info("MELI: apply coupon separate line failed: %s", str(E))
-
-
 def get_delivery_line(sorder):
     delivery_line = None
     try:
@@ -753,65 +580,26 @@ def get_delivery_line(sorder):
 
 
 def set_delivery_line( sorder, delivery_price, delivery_message ):
-    """Setea el precio de la linea de envio SIN riesgo de perderla.
-
-    El core (delivery/models/sale_order.py::set_delivery_line) ejecuta, EN ESTE ORDEN:
-        _remove_delivery_line()  ->  carrier_id = carrier.id  ->  _create_delivery_line(...)
-    Si el carrier viene VACIO, o si la escritura/creacion posterior falla (compania
-    incompatible, orden facturada, impuestos), el BORRADO ya ocurrio: la venta queda sin
-    linea de envio y sin transportista, y el flete no se factura nunca mas. Antes esa
-    excepcion se tragaba con un 'except:' pelado ("order invoiced") y el borrado quedaba
-    consumado.
-
-    Por eso:
-      1) sin carrier valido NO se llama al core -> se actualiza el precio de la linea existente;
-      2) la llamada al core va dentro de un savepoint -> si falla despues del borrado, se
-         deshace el borrado en vez de dejar la venta pelada;
-      3) los fallos se loguean con la venta y el error reales.
-
-    Caso que lo destapo (Elvimarta, jul-2026): 47 ordenes quedaron sin flete en 7 semanas y
-    20 se facturaron por debajo de lo cobrado al comprador.
-    """
     #check version
     delivery_line = get_delivery_line(sorder)
-    carrier = sorder.carrier_id
-
-    if not carrier:
-        # Sin transportista el core borraria la linea y no podria recrearla.
-        if delivery_line and abs(delivery_line.price_unit - float(delivery_price)) > 0.01:
-            delivery_line.price_unit = delivery_price
-        _logger.warning("MELI set_delivery_line: venta %s sin transportista; se conserva la "
-                        "linea de envio (precio %s) en vez de recrearla.",
-                        sorder.name, delivery_price)
-        _meli_write_delivery_message(sorder, False, delivery_message)
-        return delivery_line
-
-    recompute_delivery_price = False
-    if not delivery_line or abs(delivery_line.price_unit - float(delivery_price)) > 1.1:
-        recompute_delivery_price = bool(delivery_line)
-        try:
-            with sorder.env.cr.savepoint():
-                sorder.set_delivery_line(carrier, delivery_price)
-        except Exception as e:
-            # El savepoint deshizo el borrado: la linea previa sigue viva.
-            _logger.warning("MELI set_delivery_line: no se pudo reescribir la linea de envio "
-                            "de %s (%s); se conserva la existente.", sorder.name, e)
+    if not delivery_line:
+        sorder.set_delivery_line(sorder.carrier_id, delivery_price)
         delivery_line = get_delivery_line(sorder)
-
-    _meli_write_delivery_message(sorder, recompute_delivery_price, delivery_message)
-
-    return delivery_line
-
-
-def _meli_write_delivery_message( sorder, recompute_delivery_price, delivery_message ):
     try:
+        recompute_delivery_price = False
+
+        if (delivery_line and abs(delivery_line.price_unit - float(delivery_price)) > 1.1 ):
+            recompute_delivery_price = True
+            sorder.set_delivery_line(sorder.carrier_id, delivery_price)
+
         sorder.write({
         	'recompute_delivery_price': recompute_delivery_price,
         	'delivery_message': delivery_message,
         })
-    except Exception as e:
-        _logger.warning("MELI set_delivery_line: no se pudo escribir delivery_message en %s: %s",
-                        sorder.name, e)
+    except:
+            _logger.info("Error set_delivery_line failed (order invoiced)")
+
+    return delivery_line
 
 def remove_delivery_line( sorder, delivery_price=0):
     sorder._remove_delivery_line()

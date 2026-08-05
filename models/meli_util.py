@@ -221,13 +221,12 @@ class MeliApiNoSDK:
     def json(self):
         return self.rjson
 
-    def get(self, path, params={}, extra_headers=None, **kwargs):
+    def get(self, path, params={}, extra_headers=None):
         """
         GET genérico sin SDK.
         - Firma: get(self, path, params={}, extra_headers=None)
         - Mantiene self.response y self.rjson
         - Retorna self
-        - Absorbe kwargs desconocidos de forma segura (nunca TypeError por firma)
         """
         import time as _time_module
         _t_start = _time_module.time() if MeliApiNoSDK._benchmark_enabled else 0
@@ -309,21 +308,19 @@ class MeliApiNoSDK:
 
         return self
 
-    def get_mini(self, path, params={}, extra_headers=None, **kwargs):
-        """GET via requests — alias de get() para compatibilidad.
-        Firma alineada con get(): acepta extra_headers y absorbe kwargs
-        desconocidos de forma segura (no debe romper por firma)."""
+    def get_mini(self, path, params={}):
+        """GET via requests — alias de get() para compatibilidad"""
         import time as _time_module
         _t_start = _time_module.time() if MeliApiNoSDK._benchmark_enabled else 0
-        result = self.get(path, params, extra_headers=extra_headers)
+        result = self.get(path, params)
         if MeliApiNoSDK._benchmark_enabled:
             self._record_benchmark('get_mini', path, _time_module.time() - _t_start)
         return result
 
-    def post(self, path, body=None, params={}, extra_headers=None, **kwargs):
+    def post(self, path, body=None, params={}):
         """
         POST genérico sin SDK.
-        - Firma: post(self, path, body=None, params={}, extra_headers=None)
+        - Firma: post(self, path, body=None, params={})
         - Mantiene self.response y self.rjson
         - Retorna self
         """
@@ -334,8 +331,6 @@ class MeliApiNoSDK:
         # Extrae y NO muta el dict original
         atok = params.get("access_token", "") or ""
         headers = (params.get("headers") or {}).copy()
-        if extra_headers:
-            headers.update(extra_headers)
         timeout = params.get("timeout", 20)
         files = params.get("files", None)
         qparams = params.get("query", None)
@@ -397,21 +392,19 @@ class MeliApiNoSDK:
 
         return self
 
-    def post_mini(self, path, body=None, params={}, extra_headers=None, **kwargs):
-        """POST via requests — alias de post() para compatibilidad.
-        Firma alineada con post(): acepta extra_headers y absorbe kwargs
-        desconocidos de forma segura."""
+    def post_mini(self, path, body=None, params={}):
+        """POST via requests — alias de post() para compatibilidad"""
         import time as _time_module
         _t_start = _time_module.time() if MeliApiNoSDK._benchmark_enabled else 0
-        result = self.post(path, body, params, extra_headers=extra_headers)
+        result = self.post(path, body, params)
         if MeliApiNoSDK._benchmark_enabled:
             self._record_benchmark('post_mini', path, _time_module.time() - _t_start)
         return result
 
-    def put(self, path, body=None, params={}, extra_headers=None, **kwargs):
+    def put(self, path, body=None, params={}):
         """
         PUT genérico sin SDK.
-        - Firma: put(self, path, body=None, params={}, extra_headers=None)
+        - Firma: put(self, path, body=None, params={})
         - Mantiene self.response y self.rjson
         - Retorna self
         """
@@ -421,8 +414,6 @@ class MeliApiNoSDK:
 
         atok = params.get("access_token", "") or ""
         headers = (params.get("headers") or {}).copy()
-        if extra_headers:
-            headers.update(extra_headers)
         timeout = params.get("timeout", 20)
         qparams = params.get("query", None)
 
@@ -470,21 +461,19 @@ class MeliApiNoSDK:
 
         return self
 
-    def put_mini(self, path, body=None, params={}, extra_headers=None, **kwargs):
-        """PUT via requests — alias de put() para compatibilidad.
-        Firma alineada con put(): acepta extra_headers y absorbe kwargs
-        desconocidos de forma segura."""
+    def put_mini(self, path, body=None, params={}):
+        """PUT via requests — alias de put() para compatibilidad"""
         import time as _time_module
         _t_start = _time_module.time() if MeliApiNoSDK._benchmark_enabled else 0
-        result = self.put(path, body, params, extra_headers=extra_headers)
+        result = self.put(path, body, params)
         if MeliApiNoSDK._benchmark_enabled:
             self._record_benchmark('put_mini', path, _time_module.time() - _t_start)
         return result
 
-    def delete(self, path, params={}, extra_headers=None, **kwargs):
+    def delete(self, path, params={}):
         """
         DELETE genérico sin SDK.
-        - Firma: delete(self, path, params={}, extra_headers=None)
+        - Firma: delete(self, path, params={})
         - Mantiene self.response y self.rjson
         - Retorna self
         """
@@ -494,8 +483,6 @@ class MeliApiNoSDK:
 
         atok = params.get("access_token", "") or ""
         headers = (params.get("headers") or {}).copy()
-        if extra_headers:
-            headers.update(extra_headers)
         timeout = params.get("timeout", 20)
 
         url = self._abs_url(path)
@@ -825,14 +812,11 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
         def json(self):
             return self.rjson
 
-        def get(self, path, params={}, extra_headers=None, **kwargs):
+        def get(self, path, params={}, extra_headers=None):
             # When custom headers are required (e.g. x-version for versioned
             # endpoints) the SDK's resource_get does not expose a per-call
             # header hook, so fall back to the requests-based client which
             # supports arbitrary headers.
-            # NOTA: **kwargs absorbe cualquier keyword extra desconocido de
-            # forma segura — nunca debe tirar TypeError por firma (ver
-            # ERROR extra_headers/get_billing_info, meli_oerp 26.70 Aramid).
             if extra_headers:
                 return self.get_mini(path, params, extra_headers=extra_headers)
             try:
@@ -863,7 +847,7 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             return self
 
         # get_mini y post_mini usan requests directo (como en la versión original)
-        def get_mini(self, path, params={}, extra_headers=None, **kwargs):
+        def get_mini(self, path, params={}, extra_headers=None):
             """GET sin SDK (requests directo) - para compatibilidad"""
             _nosdk = MeliApiNoSDK(config=configuration_nosdk)
             _nosdk.__dict__.update({k: v for k, v in self.__dict__.items()
@@ -874,12 +858,7 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
             self.rjson = _nosdk.rjson
             return self
 
-        def post(self, path, body=None, params={}, extra_headers=None, **kwargs):
-            # Misma estrategia que get(): resource_post no expone un hook de
-            # headers por-llamada, así que si se piden extra_headers delegamos
-            # al cliente requests puro (get_mini/post_mini pattern).
-            if extra_headers:
-                return self.post_mini(path, body, params, extra_headers=extra_headers)
+        def post(self, path, body=None, params={}):
             try:
                 atok = ("access_token" in params and params["access_token"]) or ""
                 if atok:
@@ -894,24 +873,21 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                 pass
             return self
 
-        def post_mini(self, path, body=None, params={}, extra_headers=None, **kwargs):
+        def post_mini(self, path, body=None, params={}):
             """POST sin SDK (requests directo) - para compatibilidad"""
             _nosdk = MeliApiNoSDK(config=configuration_nosdk)
             _nosdk.__dict__.update({k: v for k, v in self.__dict__.items()
                                      if k in ('client_id', 'client_secret', 'access_token',
                                               'refresh_token', 'redirect_uri', 'seller_id')})
-            _nosdk.post(path, body, params, extra_headers=extra_headers)
+            _nosdk.post(path, body, params)
             self.response = _nosdk.response
             self.rjson = _nosdk.rjson
             return self
 
-        def put(self, path, body=None, params={}, extra_headers=None, **kwargs):
+        def put(self, path, body=None, params={}):
             try:
                 atok = params.get("access_token", "") or ""
                 headers = params.get("headers", {}) or {}
-                if extra_headers:
-                    headers = dict(headers)
-                    headers.update(extra_headers)
                 self.response = self.resource_put(resource=path, access_token=atok, body=body, headers=headers)
                 self.rjson = self.response
             except _ApiException as e:
@@ -920,18 +896,18 @@ if _versions.MELI_SDK_AVAILABLE and _meli_sdk and _ApiClient:
                 pass
             return self
 
-        def put_mini(self, path, body=None, params={}, extra_headers=None, **kwargs):
+        def put_mini(self, path, body=None, params={}):
             """PUT sin SDK (requests directo) - para compatibilidad"""
             _nosdk = MeliApiNoSDK(config=configuration_nosdk)
             _nosdk.__dict__.update({k: v for k, v in self.__dict__.items()
                                      if k in ('client_id', 'client_secret', 'access_token',
                                               'refresh_token', 'redirect_uri', 'seller_id')})
-            _nosdk.put(path, body, params, extra_headers=extra_headers)
+            _nosdk.put(path, body, params)
             self.response = _nosdk.response
             self.rjson = _nosdk.rjson
             return self
 
-        def delete(self, path, params={}, extra_headers=None, **kwargs):
+        def delete(self, path, params={}):
             try:
                 atok = ("access_token" in params and params["access_token"]) or ""
                 self.response = self.resource_delete(resource=path, access_token=atok)
@@ -1045,12 +1021,6 @@ else:
     _logger.info("MeliApi: usando requests directo (sin SDK)")
 
 
-# Flag de proceso: loguear UNA sola vez que se omite el refresh por neutralización
-# (evita spam del cron 'Get Meli State' cada 10 min). Se resetea al reiniciar el
-# worker de Odoo (aceptable).
-_NEUTRALIZED_REFRESH_LOGGED = False
-
-
 class MeliUtil(models.AbstractModel):
 
     _name = 'meli.util'
@@ -1058,27 +1028,6 @@ class MeliUtil(models.AbstractModel):
 
     def get_meli_state(self):
         return self.get_new_instance()
-
-    def _meli_is_neutralized(self):
-        """True si la DB está neutralizada (staging/duplicado en Odoo.sh).
-
-        En esas DBs NUNCA se debe rotar el refresh_token de MercadoLibre: el POST
-        grant_type=refresh_token rota el token del lado de ML (token rotativo de un
-        solo uso) e invalidaría el access_token de PRODUCCIÓN. Odoo marca las copias
-        neutralizadas con ir.config_parameter 'database.is_neutralized'.
-        """
-        try:
-            val = self.env['ir.config_parameter'].sudo().get_param('database.is_neutralized')
-        except Exception:
-            return False
-        return str(val).strip().lower() in ('1', 'true', 't', 'yes')
-
-    def _meli_log_neutralized_skip(self):
-        """Loguea una sola vez por proceso que se omite el refresh por neutralización."""
-        global _NEUTRALIZED_REFRESH_LOGGED
-        if not _NEUTRALIZED_REFRESH_LOGGED:
-            _logger.info("DB neutralizada: se omite refresh de token ML para no invalidar producción")
-            _NEUTRALIZED_REFRESH_LOGGED = True
 
     @api.model
     def get_new_instance(self, company=None, refresh_force=False):
@@ -1102,15 +1051,7 @@ class MeliUtil(models.AbstractModel):
                 api_client = _ApiClient(configuration=configuration_sdk)
             api_rest_client = MeliApi(api_client)
         else:
-            if use_custom_host:
-                config = MeliConfiguration(host=api_host)
-                # Host de rescate: sin auto-retry (los 429 agravan el rate-limit del proxy).
-                # Espeja la rama SDK: el config fresco por-host NO debe heredar el Retry
-                # por defecto (status_forcelist=[413,429,503]); reintentar contra el proxy
-                # sólo amplifica el bloqueo. Resiliencia = sin reintentos in-band.
-                config.retries = False
-            else:
-                config = configuration_nosdk
+            config = MeliConfiguration(host=api_host) if use_custom_host else configuration_nosdk
             api_rest_client = MeliApi(config=config)
         api_rest_client.client_id = company.mercadolibre_client_id
         api_rest_client.client_secret = company.mercadolibre_secret_key
@@ -1190,13 +1131,7 @@ class MeliUtil(models.AbstractModel):
                                     pass;
                             logs+= str(message)+"\n"
                             _logger.info("message: " +str(message))
-                            if self._meli_is_neutralized():
-                                # DB neutralizada (staging/duplicado en Odoo.sh): NUNCA rotar el refresh_token.
-                                # El POST grant_type=refresh_token lo rota server-side en ML y le robaría la
-                                # sesión a PRODUCCIÓN. needlogin_state ya quedó True arriba; el entorno de test
-                                # puede seguir LEYENDO con el access_token vigente hasta que expire (aceptable).
-                                self._meli_log_neutralized_skip()
-                            elif (refresh_force or ( message and "invalid" in str(message)) or ( message and "expired" in str(message)) 
+                            if (refresh_force or ( message and "invalid" in str(message)) or ( message and "expired" in str(message)) 
                                 or message=="expired_token" or message=="invalid_token" or message=="internal_server_error"):
                                 api_rest_client.needlogin_state = True
                                 try:

@@ -77,35 +77,6 @@ def _meli_short_permalink(meli_id):
     domain = _MELI_PRODUCT_DOMAINS.get(site, 'https://www.mercadolibre.com')
     return domain + '/' + site + '-' + meli_id[k:]
 
-
-def _meli_is_valid_gtin(code):
-    """¿`code` es un GTIN/EAN/UPC válido para MercadoLibre?
-
-    MercadoLibre acepta como Product Identifier (GTIN) sólo códigos GTIN-8,
-    UPC-A (12), EAN-13 (13) o GTIN-14: numéricos, de longitud 8/12/13/14 y con
-    dígito verificador correcto (módulo 10, GS1). Un SKU/código interno como
-    'C6536' NO es un GTIN → devuelve False y NO debe mandarse como GTIN.
-
-    100% defensivo: cualquier entrada no válida devuelve False.
-    """
-    if not code:
-        return False
-    try:
-        s = str(code).strip()
-        if not s.isdigit() or len(s) not in (8, 12, 13, 14):
-            return False
-        digits = [int(c) for c in s]
-        check = digits[-1]
-        body = digits[:-1]
-        # dígito verificador GS1: pesos 3/1 alternados desde la derecha del cuerpo
-        total = 0
-        for i, d in enumerate(reversed(body)):
-            total += d * (3 if i % 2 == 0 else 1)
-        expected = (10 - (total % 10)) % 10
-        return expected == check
-    except Exception:
-        return False
-
 class MyHTMLParser(HTMLParser):
 
     full_text = ""
@@ -277,207 +248,6 @@ class product_template(models.Model):
                             return ret
 
         return ret
-
-    def _meli_template_variant(self):
-        """Return the variant that carries the ML publication (meli_id lives on
-        product.product, NOT on product.template)."""
-        self.ensure_one()
-        return self.product_variant_ids.filtered("meli_id")[:1]
-
-    def _meli_backfill_get_accounts(self):
-        """Hook: list the ML "accounts" to back-fill from. Each entry is a dict:
-          'key'     unique str id for the account,
-          'meli'    a logged-in meli.util instance (its own token),
-          'company' res.company for owner preference (may be empty),
-          'source'  the record able to list its own item ids via
-                    fetch_list_meli_ids(meli=...).
-
-        Base = single-account layout: one entry per ML-configured res.company
-        (seller_id + token live on the company). meli_oerp_multiple overrides
-        this to iterate mercadolibre.account, where the tokens actually live in
-        multi-account setups (the companies there have seller_id/token=False)."""
-        util = self.env['meli.util']
-        accounts = []
-        ml_companies = self.env['res.company'].search([('mercadolibre_seller_id', '!=', False)])
-        for company in ml_companies:
-            meli = util.get_new_instance(company)
-            if meli and not meli.need_login():
-                accounts.append({'key': 'company-%s' % company.id, 'meli': meli, 'company': company, 'source': company})
-            else:
-                _logger.warning("MELI backfill: cuenta '%s' sin login, se omite", company.name)
-        return accounts
-
-    def _meli_backfill_list_ids(self, account):
-        """Hook: return the meli_id (str) list owned by `account` (an entry from
-        _meli_backfill_get_accounts). Default uses the source record's
-        fetch_list_meli_ids, defined with the same signature both on res.company
-        and on mercadolibre.account. NOTE: no longer used by the backfill itself
-        (which now resolves ownership by direct per-item fetch, reliable on large
-        accounts); kept as an optional fallback / helper for callers that want a
-        seller's item list."""
-        ids = account['source'].fetch_list_meli_ids(meli=account['meli']) or []
-        return [str(m) for m in ids]
-
-    def _meli_backfill_fetch_item(self, meli, meli_id):
-        """Fetch a single ML item authenticated with `meli`'s token, proxy-safe.
-
-        Reuses the suite's meli.util instance (`meli.get`), which on clients with
-        the proxy rescue routes the request through their http_proxy -- do NOT
-        replace this with raw urllib. Returns the item dict on HTTP 200, or None
-        when the call fails / is denied (a foreign seller's token yields 403
-        access_denied, which we treat as "not this account")."""
-        try:
-            response = meli.get(
-                "/items/" + str(meli_id),
-                {'access_token': meli.access_token, 'include_attributes': 'all'},
-            )
-        except Exception as e:
-            _logger.debug("MELI backfill: fetch %s falló en transporte: %s", meli_id, e)
-            return None
-        if response is None:
-            return None
-        status = getattr(response, 'status_code', None)
-        if status is not None and status != 200:
-            return None
-        try:
-            rjson = response.json()
-        except Exception:
-            return None
-        if not isinstance(rjson, dict) or 'error' in rjson or not rjson.get('id'):
-            return None
-        return rjson
-
-    def _meli_backfill_notify(self, message, warning=False):
-        """Notification shown when the backfill ends. Sticky on purpose: the run
-        takes minutes, and a toast that fades is exactly what left users unsure
-        whether anything happened at all."""
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': "Traer medidas",
-                'message': message,
-                'type': 'warning' if warning else 'success',
-                'sticky': True,
-            },
-        }
-
-    def action_meli_backfill_template_fields(self):
-        """Backfill the MELI "Plantilla" Char fields (seller package
-        dimensions, brand, model, gender) for already-imported products by
-        re-reading their ML item.
-
-        DIRECT FETCH per item (no pre-scan). Each product's ML item is fetched
-        directly at /items/<meli_id>, probing the token of every logged-in ML
-        account (from the overridable _meli_backfill_get_accounts hook; base =
-        res.company, meli_oerp_multiple = mercadolibre.account) until one returns
-        HTTP 200 -- that is the OWNING account (a foreign seller's token yields
-        403 access_denied, so we move on to the next). This replaces the old
-        approach that resolved ownership by pre-scanning each seller's full item
-        list via fetch_list_meli_ids: on LARGE accounts (e.g. DECO ~20.8k items)
-        that paged listing does NOT cover every item, so many products were left
-        untouched. The direct fetch always reaches the item regardless of catalog
-        size (verified in prod on account 526 / item MLA1685903163).
-
-        The account that last answered OK is remembered and tried first, so a run
-        over one seller's catalog does not re-probe every account for each item;
-        the product's own company is preferred next (multi-company). Batch-safe:
-        one savepoint per product so a failing item never aborts the whole run.
-        Idempotent / overwrite semantics live in _meli_import_template_attributes
-        (SELLER_PACKAGE_* overwrite, brand/model/gender fill-empty). Usable as a
-        form button and a list action.
-
-        Always ends in a user-facing notification: this runs for minutes over
-        thousands of products and used to return silently, so from the UI it was
-        indistinguishable from doing nothing (Deco/KPI ticket #485)."""
-        # meli_id lives on the variant (product.product), so filter templates by
-        # their variants' meli_id (NOT template.meli_id, which does not exist).
-        if self:
-            templates = self.filtered(lambda t: any(v.meli_id for v in t.product_variant_ids))
-        else:
-            templates = self.search([('product_variant_ids.meli_id', '!=', False)])
-
-        # Selected products with no ML link at all: filtered out above, but the
-        # user has to hear about them -- picking non-published products and
-        # getting "0 updated" is otherwise unexplainable.
-        unlinked = len(self) - len(templates) if self else 0
-
-        accounts = self._meli_backfill_get_accounts()
-        if not accounts:
-            _logger.warning("MELI backfill: no hay cuentas ML logueadas; nada que hacer")
-            return self._meli_backfill_notify(
-                "No hay ninguna cuenta de MercadoLibre conectada, así que no se pudo traer nada. "
-                "Revisá la conexión de la cuenta y volvé a intentar.", warning=True)
-
-        if not templates:
-            _logger.info("MELI backfill plantilla: ningún producto seleccionado está vinculado a ML")
-            return self._meli_backfill_notify(
-                ("Ninguno de los %s productos seleccionados está vinculado a una publicación de "
-                 "MercadoLibre, así que no hay medidas para traer." % unlinked) if self else
-                "No hay ningún producto vinculado a una publicación de MercadoLibre.",
-                warning=True)
-
-        # Remember which account owned the previous item to try it first (items
-        # of one seller tend to come in runs); the product's own company is the
-        # next preference. No pre-scan of fetch_list_meli_ids here.
-        last_ok_key = [None]
-
-        def _ordered_accounts(template):
-            cand = template.company_id
-
-            def _rank(a):
-                if last_ok_key[0] and a['key'] == last_ok_key[0]:
-                    return 0
-                if cand and a.get('company') and a['company'].id == cand.id:
-                    return 1
-                return 2
-            return sorted(accounts, key=_rank)
-
-        def _fetch_item(meli_id, template):
-            for a in _ordered_accounts(template):
-                rjson = self._meli_backfill_fetch_item(a['meli'], meli_id)
-                if rjson is not None:
-                    last_ok_key[0] = a['key']
-                    return rjson
-            return None
-
-        total = len(templates)
-        done = ok = errors = skipped = 0
-        _logger.info("MELI backfill plantilla: starting for %s templates (%s cuentas ML)", total, len(accounts))
-        for template in templates:
-            done += 1
-            variant = template._meli_template_variant()
-            meli_id = variant.meli_id if variant else False
-            if not meli_id:
-                skipped += 1
-                continue
-            try:
-                with self.env.cr.savepoint():
-                    rjson = _fetch_item(meli_id, template)
-                    if not rjson:
-                        errors += 1
-                        _logger.warning("MELI backfill: item %s no respondió 200 con ninguna cuenta ML, se omite", meli_id)
-                        continue
-                    variant._meli_import_template_attributes(template, rjson)
-                    ok += 1
-            except Exception as e:
-                errors += 1
-                _logger.error("MELI backfill error on template %s (meli_id=%s): %s", template.id, meli_id, e, exc_info=True)
-            if done % 50 == 0:
-                _logger.info("MELI backfill progress: %s/%s (ok=%s, errors=%s)", done, total, ok, errors)
-        _logger.info("MELI backfill plantilla: finished %s/%s (ok=%s, errors=%s, skipped=%s)",
-                     done, total, ok, errors, skipped)
-
-        # unlinked (never had an ML link) and skipped (link on the template but
-        # not on the variant) are the same story for the user: "no había de dónde
-        # traerlas". Keep them apart in the log, together on screen.
-        omitted = unlinked + skipped
-        parts = ["%s producto(s) actualizado(s) con los datos de MercadoLibre" % ok]
-        if omitted:
-            parts.append("%s sin publicación vinculada (se omitieron)" % omitted)
-        if errors:
-            parts.append("%s no se pudieron leer de MercadoLibre (ver el registro del servidor)" % errors)
-        return self._meli_backfill_notify(". ".join(parts) + ".", warning=bool(errors) or not ok)
 
     def _collect_and_upload_images_for_meli(self, meli=None, config=None):
         """
@@ -860,15 +630,11 @@ class product_template(models.Model):
         meli_categ = self.env['mercadolibre.category'].sudo()
         _logger.info(rjson)
         _logger.info(isinstance(rjson, list))
-        # FIX #532 (perf): SÓLO sugerir. Limitamos a las 3 primeras opciones de domain_discovery
-        # e importamos en modo LIVIANO (predict_only=True): id+nombre, sin atributos ni árbol.
-        # La hidratación completa (atributos/chart) se hace al SELECCIONAR (wizard.apply_category).
-        _MAX_PREDICTOR_SUGGESTIONS = 3
         if rjson and isinstance(rjson, list):
-            for data in rjson[:_MAX_PREDICTOR_SUGGESTIONS]:
+            for data in rjson:
                 if "category_id" in data:
                     #_logger.info("Take first suggestion")
-                    meli_categ += self.env['mercadolibre.category'].import_category(data['category_id'], meli=meli, predict_only=True )
+                    meli_categ += self.env['mercadolibre.category'].import_category(data['category_id'], meli=meli )
                     if (meli_categ==None):
                         _logger.info("Import category failed.")
         return meli_categ, rjson
@@ -933,19 +699,6 @@ class product_template(models.Model):
                 r = variant.with_context(custom_context).product_post_price(meli=meli)
                 res.append(r)
         return res
-
-    def product_template_post_title( self, context=None, meli=None ):
-        # Empuja SOLO el título (no el producto completo) a MercadoLibre. Espejo de
-        # product_template_post_price pero corta y devuelve el error del primer
-        # variant que falle (dict con 'error') para que el wizard lo muestre.
-        _logger.info("base product.template: product_template_post_title")
-        context = context or self.env.context
-        for productT in self:
-            for variant in productT.product_variant_ids:
-                r = variant.product_post_title(meli=meli)
-                if r and isinstance(r, dict) and 'error' in r:
-                    return r
-        return {}
 
     #name = fields.Char('Name', size=128, required=True, translate=False, index=True)
     meli_title = fields.Char(string='Nombre del producto en Mercado Libre',size=256)
@@ -1053,230 +806,9 @@ class product_template(models.Model):
     meli_seller_package_length = fields.Char(string="Largo del paquete [vendedor]", help="SELLER_PACKAGE_LENGTH: Largo del paquete a enviar. Ej: '40 cm'")
     meli_seller_package_weight = fields.Char(string="Peso del paquete [vendedor]", help="SELLER_PACKAGE_WEIGHT: Peso del paquete a enviar. Ej: '500 g'")
 
-    # Product dimensions (the item itself, NOT the shipping package) taken from
-    # the ML product attributes WIDTH/HEIGHT/LENGTH. Numeric value + its unit
-    # kept apart on purpose (value as Float so it is directly usable downstream,
-    # e.g. copied onto the sale order line; unit kept verbatim as ML sends it,
-    # 'm'/'cm'/... -- we do NOT normalize). [#424 Deco/KPI]
-    meli_product_width = fields.Float(string="Ancho del producto", help="Atributo WIDTH de la publicación (valor numérico).")
-    meli_product_width_unit = fields.Char(string="Unidad ancho", help="Unidad del atributo WIDTH tal como la envía ML (ej. 'm', 'cm').")
-    meli_product_height = fields.Float(string="Alto del producto", help="Atributo HEIGHT de la publicación (valor numérico).")
-    meli_product_height_unit = fields.Char(string="Unidad alto", help="Unidad del atributo HEIGHT tal como la envía ML (ej. 'm', 'cm').")
-    meli_product_length = fields.Float(string="Largo del producto", help="Atributo LENGTH de la publicación (valor numérico).")
-    meli_product_length_unit = fields.Char(string="Unidad largo", help="Unidad del atributo LENGTH tal como la envía ML (ej. 'm', 'cm').")
-
-    # Taxes brought from ML (VALUE_ADDED_TAX / IMPORT_DUTY). Often mandatory to
-    # publish (#474); imported so they need not be entered by hand. Ej: '21 %'.
-    meli_vat = fields.Char(string="IVA [meli]", help="Atributo VALUE_ADDED_TAX de la publicación (ej. '21 %').")
-    meli_import_duty = fields.Char(string="Impuesto interno [meli]", help="Atributo IMPORT_DUTY de la publicación (ej. '0 %').")
-
 class product_product(models.Model):
 
     _inherit = "product.product"
-
-    # --- ML -> Odoo import of the MELI "Plantilla" tab attributes -----------
-    # Single source of truth for the ML item-attribute -> Odoo Char field map
-    # used by the import (_meli_import_template_attributes) and the backfill.
-    # SELLER_PACKAGE_* are the seller-editable Mercado Envios shipping
-    # dimensions; the publish side (Odoo->ML) builds these same ids.
-    _MELI_IMPORT_ATTR_MAP = {
-        "SELLER_PACKAGE_HEIGHT": "meli_seller_package_height",
-        "SELLER_PACKAGE_WIDTH":  "meli_seller_package_width",
-        "SELLER_PACKAGE_LENGTH": "meli_seller_package_length",
-        "SELLER_PACKAGE_WEIGHT": "meli_seller_package_weight",
-        "BRAND":  "meli_brand",
-        "MODEL":  "meli_model",
-        "GENDER": "meli_gender",
-        # Taxes: often MANDATORY to publish (see #474). Bring them from ML so the
-        # client does not have to re-enter them by hand. ML value like '21 %'.
-        "VALUE_ADDED_TAX": "meli_vat",
-        "IMPORT_DUTY":     "meli_import_duty",
-    }
-    # Catalog PACKAGE_* attrs (read-only on ML) fall back to the SAME seller
-    # fields; publish remaps PACKAGE_*->SELLER_PACKAGE_* (same relation, here
-    # reversed for import). Lower priority than the SELLER_PACKAGE_* primaries.
-    _MELI_IMPORT_ATTR_FALLBACK = {
-        "PACKAGE_HEIGHT": "meli_seller_package_height",
-        "PACKAGE_WIDTH":  "meli_seller_package_width",
-        "PACKAGE_LENGTH": "meli_seller_package_length",
-        "PACKAGE_WEIGHT": "meli_seller_package_weight",
-    }
-    # Fields where ML (SELLER_PACKAGE_*/PACKAGE_*) is the AUTHORITATIVE source:
-    # on import/backfill they OVERWRITE any pre-existing Odoo value whenever ML
-    # sends a non-empty one. This corrects legacy rows where an old process
-    # stored the product WIDTH/HEIGHT (e.g. '100 cm') in the package field
-    # instead of the real SELLER_PACKAGE_WIDTH ('10 cm'). The remaining mapped
-    # fields (brand/model/gender) stay fill-empty (may be manual). ML empty
-    # never wipes (guarded by `if not val: continue`).
-    _MELI_IMPORT_OVERWRITE_FIELDS = {
-        "meli_seller_package_height",
-        "meli_seller_package_width",
-        "meli_seller_package_length",
-        "meli_seller_package_weight",
-        # Taxes: ML authoritative -> keep synced on every import (mandatory
-        # attributes, avoid manual drift). [#474]
-        "meli_vat",
-        "meli_import_duty",
-    }
-    # Product dimensions (item, not package): ML attribute id -> (value field,
-    # unit field). Value goes to a Float, unit kept verbatim in a Char. ML is
-    # authoritative -> overwrite when it sends a numeric value. [#424 Deco/KPI]
-    _MELI_PRODUCT_DIM_MAP = {
-        "WIDTH":  ("meli_product_width",  "meli_product_width_unit"),
-        "HEIGHT": ("meli_product_height", "meli_product_height_unit"),
-        "LENGTH": ("meli_product_length", "meli_product_length_unit"),
-    }
-
-    @staticmethod
-    def _meli_parse_dimension(att):
-        """Split an ML dimension attribute into (number, unit).
-
-        Prefers ML's structured form (`value_struct = {'number': 1.2,
-        'unit': 'm'}`); falls back to parsing `value_name` like '1.2 m' /
-        '70 cm' (also tolerates a comma decimal). Returns (None, None) when no
-        numeric value can be read -- the caller then leaves the field untouched
-        (ML empty never wipes)."""
-        if not isinstance(att, dict):
-            return (None, None)
-        vs = att.get("value_struct")
-        if isinstance(vs, dict) and vs.get("number") not in (None, False, ""):
-            try:
-                return (float(vs.get("number")), (vs.get("unit") or "").strip() or False)
-            except (TypeError, ValueError):
-                pass
-        raw = att.get("value_name")
-        if not raw:
-            return (None, None)
-        m = re.search(r"([-+]?\d+(?:[.,]\d+)?)\s*([^\d\s].*)?$", str(raw).strip())
-        if not m:
-            return (None, None)
-        try:
-            number = float(m.group(1).replace(",", "."))
-        except (TypeError, ValueError):
-            return (None, None)
-        unit = (m.group(2) or "").strip() or False
-        return (number, unit)
-
-    @staticmethod
-    def _meli_attr_value(att):
-        """Robustly extract an attribute value as ML may send it:
-        value_name, values[0].name/value_name, or value_id (as string)."""
-        if not isinstance(att, dict):
-            return None
-        val = att.get("value_name")
-        if not val:
-            values = att.get("values")
-            if values and isinstance(values, list) and isinstance(values[0], dict):
-                val = values[0].get("name") or values[0].get("value_name")
-        if not val:
-            vid = att.get("value_id")
-            if vid not in (None, False, ""):
-                val = str(vid)
-        if val is None:
-            return None
-        val = str(val).strip()
-        return val or None
-
-    def _meli_import_template_attributes(self, product_template, rjson):
-        """ML->Odoo: populate the MELI "Plantilla" tab Char fields (seller
-        package dimensions + BRAND/MODEL/GENDER) from the item `attributes`.
-
-        Write semantics (per field):
-          * Package dims (_MELI_IMPORT_OVERWRITE_FIELDS): ML SELLER_PACKAGE_* is
-            AUTHORITATIVE -> OVERWRITE the Odoo value whenever ML sends a
-            non-empty one (corrects legacy rows that stored the product
-            WIDTH/HEIGHT instead of the package measure).
-          * brand/model/gender: fill-empty (may be manual) -> only written when
-            the Odoo field is currently empty.
-        ML empty never wipes: a field is touched only when ML provides a
-        non-empty value. The catalog PACKAGE_* fallback applies only when no
-        SELLER_PACKAGE_* is present. Bare WIDTH/HEIGHT/LENGTH (the *product*
-        dimensions, distinct from the package) go to the numeric
-        meli_product_{width,height,length} + their *_unit Char via
-        _MELI_PRODUCT_DIM_MAP (ML authoritative -> overwrite). [#424]
-        Writes the template and EVERY variant of the publication (all the
-        variants sharing `self.meli_id`), not just `self` -- the item-level
-        values (size/taxes/package) are common to all colour variants. `self`
-        may be an empty product.product recordset (then only the template is
-        written)."""
-        if not rjson or not isinstance(rjson, dict):
-            return
-        attributes = rjson.get("attributes") or []
-        if not isinstance(attributes, list) or not attributes:
-            return
-        primary = self._MELI_IMPORT_ATTR_MAP
-        fallback = self._MELI_IMPORT_ATTR_FALLBACK
-        # ml_prod_vals collects every value ML provides for a product.product
-        # field, WITHOUT deciding overwrite/fill-empty yet -- that decision is
-        # per-record and is applied below to every variant of the publication.
-        tmpl_vals = {}
-        ml_prod_vals = {}
-        overwrite_variant_fields = set(self._MELI_IMPORT_OVERWRITE_FIELDS)
-        for _pair in self._MELI_PRODUCT_DIM_MAP.values():
-            overwrite_variant_fields.update(_pair)
-        seen_primary = set()
-        for att in attributes:
-            if not isinstance(att, dict):
-                continue
-            att_id = att.get("id")
-            if not att_id:
-                continue
-            is_primary = att_id in primary
-            field = primary.get(att_id) or fallback.get(att_id)
-            if not field:
-                continue
-            # a fallback PACKAGE_* must not override a primary SELLER_PACKAGE_*
-            if not is_primary and field in seen_primary:
-                continue
-            val = self._meli_attr_value(att)
-            if not val:
-                continue
-            if is_primary:
-                seen_primary.add(field)
-            # Package dims/taxes: ML is authoritative -> overwrite. Others
-            # (brand/model/gender): fill-empty (do not clobber manual input).
-            overwrite = field in self._MELI_IMPORT_OVERWRITE_FIELDS
-            if field in product_template._fields:
-                if overwrite or not product_template[field]:
-                    tmpl_vals[field] = val
-            if field in self._fields:
-                ml_prod_vals[field] = val
-        # Product dimensions (WIDTH/HEIGHT/LENGTH) -> Float value + unit Char, on
-        # BOTH template and variant. ML is authoritative -> overwrite when it
-        # sends a numeric value; a missing/blank one is left untouched. [#424]
-        dim_map = self._MELI_PRODUCT_DIM_MAP
-        for att in attributes:
-            if not isinstance(att, dict):
-                continue
-            pair = dim_map.get(att.get("id"))
-            if not pair:
-                continue
-            value_field, unit_field = pair
-            number, unit = self._meli_parse_dimension(att)
-            if number is None:
-                continue
-            if value_field in product_template._fields:
-                tmpl_vals[value_field] = number
-                tmpl_vals[unit_field] = unit
-            if value_field in self._fields:
-                ml_prod_vals[value_field] = number
-                ml_prod_vals[unit_field] = unit
-        if tmpl_vals:
-            product_template.write(tmpl_vals)
-            _logger.info("MELI import: plantilla fields set on template %s: %s", product_template.id, list(tmpl_vals.keys()))
-        # Write to EVERY variant of this publication, not just `self`. These are
-        # item-level fields (size/taxes/package are the same for all the colour
-        # variants), and the backfill used to pass only the first variant, so the
-        # rest stayed empty -- the "solo toma la primera variante" report. [#424]
-        if ml_prod_vals and self:
-            siblings = self.product_tmpl_id.product_variant_ids.filtered(
-                lambda v: v.meli_id and v.meli_id == self.meli_id
-            ) or self
-            for _v in siblings:
-                vals = {f: val for f, val in ml_prod_vals.items()
-                        if f in overwrite_variant_fields or not _v[f]}
-                if vals:
-                    _v.write(vals)
 
     def action_debug_supplierinfo(self):
         """Delegates to template. Kept so cached views don't break Odoo 19 validation."""
@@ -1490,10 +1022,7 @@ class product_product(models.Model):
 
         mlcatid, www_cat_id = self.env["mercadolibre.category"].meli_get_category( category_id, meli=meli, create_missing_website=config.mercadolibre_create_website_categories, config=config )
 
-        # Defensa-en-profundidad: solo escribir si el id de mercadolibre.category existe
-        # realmente. Evita FK violation (meli_category=<id> not present) si meli_get_category
-        # devolviera un id huerfano; un id invalido abortaria la transaccion de toda la sync.
-        if (mlcatid and self.env["mercadolibre.category"].browse(mlcatid).exists()):
+        if (mlcatid):
             product.write( {'meli_category': mlcatid} )
             product_template.write( {'meli_category': mlcatid} )
 
@@ -2351,32 +1880,21 @@ class product_product(models.Model):
         if ( "variations" in item_json and len(item_json["variations"]) ):
 
             for var in item_json["variations"]:
-                vupid = var.get("user_product_id") if isinstance(var, dict) else None
                 if (meli_id_variation and str(var["id"])==str(meli_id_variation)):
                     #_logger.info("meli_oerp > _fetch_meli_user_product_id > found! "+str(var))
-                    # exact variation requested -> return its own user_product_id
-                    if vupid:
-                        upid = vupid
+                    if "user_product_id" in var and var["user_product_id"]:
+                        upid = var["user_product_id"]
                         return upid
                 else:
-                    if vupid:
-                        upid = vupid
-                        if vupid not in upids:
-                            upids.append(vupid)
-
-            if (not meli_id_variation):
-                # A2 fix (ticket #425): do NOT return the list-string str(upids)
-                # (e.g. "['MLMU123']"). It used to be persisted verbatim into
-                # meli_user_product_id, which broke the user-products stock push
-                # (degraded to standard -> not_modifiable -> stranded, the
-                # "no posted stock try" signature). With no specific variation
-                # requested, only return a user_product_id when it is unambiguous:
-                # a single distinct variation-level upid; otherwise fall back to the
-                # item-level upid (if any) or None. Never fabricate a value.
-                if len(upids) == 1:
-                    return upids[0]
-                item_upid = item_json.get("user_product_id")
-                return item_upid or None
+                    if "user_product_id" in var and var["user_product_id"]:
+                        upid = var["user_product_id"]
+            
+            if (upid):
+                upids.append(upid)
+                if (not meli_id_variation):
+                    #devolvemos el arreglo de upids para referenciarlo en la publicacion
+                    #solo si tiene contenido
+                    return str(upids)
 
         return upid
 
@@ -2471,13 +1989,7 @@ class product_product(models.Model):
         #    product._meli_set_images(product_template=product_template, pictures=pictures, rjson=rjson)
 
         #categories
-        # [solsun-local->source] Savepoint: un fallo SQL en _meli_set_category abortaba la tx y
-        # TODO lo posterior de la sync (precio, posting.search, ...) caia con InFailedSqlTransaction.
-        try:
-            with self.env.cr.savepoint():
-                product._meli_set_category( product_template, rjson['category_id'], meli=meli, config=config )
-        except Exception as e:
-            _logger.error(e, exc_info=True)
+        product._meli_set_category( product_template, rjson['category_id'], meli=meli, config=config )
 
         #prices
         force_price_for_variant = True
@@ -2590,9 +2102,6 @@ class product_product(models.Model):
 
         product.write( meli_fields )
         product_template.write( tmpl_fields )
-        # ML -> Odoo: populate MELI "Plantilla" tab fields from item attributes.
-        # Package dims overwrite (ML authoritative); brand/model/gender fill-empty.
-        product._meli_import_template_attributes( product_template, rjson )
         meli_available_quantity = rjson.get('available_quantity', 0)
         if (meli_available_quantity >=0):
             UpdateProductType(product_template)
@@ -2836,12 +2345,24 @@ class product_product(models.Model):
             seller_sku = None
             barcode = None
 
+            _seller_pkg_attr_map = {
+                "SELLER_PACKAGE_HEIGHT": "meli_seller_package_height",
+                "SELLER_PACKAGE_WIDTH":  "meli_seller_package_width",
+                "SELLER_PACKAGE_LENGTH": "meli_seller_package_length",
+                "SELLER_PACKAGE_WEIGHT": "meli_seller_package_weight",
+            }
             if not seller_sku and "attributes" in rjson:
                 for att in rjson['attributes']:
                     if att["id"] == "SELLER_SKU":
                         seller_sku = att["values"][0]["name"]
                     if att["id"] == "GTIN":
                         barcode = att["values"][0]["name"]
+                    if att["id"] in _seller_pkg_attr_map:
+                        _val = att.get("value_name") or (att.get("values") and att["values"][0].get("name"))
+                        if _val:
+                            _fld = _seller_pkg_attr_map[att["id"]]
+                            product[_fld] = _val
+                            product_template[_fld] = _val
 
             if (not seller_sku and "seller_custom_field" in rjson):
                 seller_sku = rjson["seller_custom_field"]
@@ -3601,49 +3122,6 @@ class product_product(models.Model):
             if (variant_principal):
                 product.meli_id = variant_principal.meli_id
 
-    def _meli_category_requires_gtin( self, meli_category=None ):
-        """True si la categoría de ML exige el atributo GTIN (tag 'required').
-
-        Usa el catálogo YA importado `mercadolibre.category.attribute` (campo
-        `required`, poblado desde GET /categories/{cat}/attributes). No hace
-        llamadas a la API en runtime. 100% defensivo -> ante error asume False.
-        """
-        try:
-            meli_category = meli_category if meli_category is not None else self.meli_category
-            cat_id = meli_category and meli_category.meli_category_id
-            if not cat_id:
-                return False
-            att = self.env['mercadolibre.category.attribute'].sudo().search([
-                ('cat_id', '=', cat_id), ('att_id', '=', 'GTIN'), ('required', '=', True)
-            ], limit=1)
-            return bool(att)
-        except Exception:
-            _logger.exception("meli GTIN required check failed; assuming not required")
-            return False
-
-    def _meli_gtin_attribute( self, barcode, meli_category=None ):
-        """Decide, category-aware, si mandar el atributo GTIN a MercadoLibre.
-
-        Reglas:
-        - `barcode` es GTIN/EAN/UPC válido -> {'id':'GTIN','value_name': barcode}.
-        - `barcode` inválido/vacío + la categoría NO exige GTIN -> None (no se
-          envía; evita el 400 'Product Identifier [GTIN] invalid format' y permite
-          publicar productos cuyo barcode es en realidad un SKU interno).
-        - `barcode` inválido + la categoría SÍ exige GTIN -> None + warning LEGIBLE
-          (no se manda el SKU inválido; hay que cargar un EAN real). "Inventar" un
-          GTIN queda como last-resort explícito (opt-in), NUNCA por default.
-
-        Devuelve el dict del atributo, o None si no corresponde mandarlo.
-        """
-        if _meli_is_valid_gtin(barcode):
-            return { "id": "GTIN", "value_name": str(barcode).strip() }
-        if barcode and self._meli_category_requires_gtin(meli_category):
-            _logger.warning(
-                "MELI GTIN: la categoría exige un GTIN/EAN válido, pero el código '%s' no lo es "
-                "(parece un SKU/código interno). No se envía como GTIN; cargá un EAN/GTIN real "
-                "para poder publicar en esta categoría.", barcode)
-        return None
-
     #Add/Update SELLER_SKU attribute, only if present in Odoo, also can update GTIN (barcode)
     def _update_sku_attribute( self, attributes=[], set_sku=True, set_barcode=True, var_info = [] ):
 
@@ -3662,8 +3140,7 @@ class product_product(models.Model):
 
             elif (set_barcode and "id" in att and att["id"]=="GTIN" and variant.barcode):
                 barcode_updated = True
-                # category-aware: solo mandar GTIN si es un EAN/GTIN válido (no un SKU)
-                att = variant._meli_gtin_attribute(variant.barcode, variant.meli_category)
+                att = { "id": att["id"], "value_name": variant.barcode }
 
             #no duplicar row id
             if att and "id" in att and att["id"]!="SIZE_GRID_ROW_ID":
@@ -3673,10 +3150,7 @@ class product_product(models.Model):
             updated_attributes.append( { "id": "SELLER_SKU", "value_name": variant.default_code } )
 
         if not barcode_updated and set_barcode and variant.barcode:
-            # category-aware: solo agregar GTIN si el barcode es un EAN/GTIN válido
-            _gtin_attr = variant._meli_gtin_attribute(variant.barcode, variant.meli_category)
-            if _gtin_attr:
-                updated_attributes.append(_gtin_attr)
+            updated_attributes.append( { "id": "GTIN", "value_name": variant.barcode } )
 
         var_attributes_grid = variant._update_row_size_grid_attribute( attributes=attributes, var_info = var_info )
         _logger.info("var_attributes_grid: "+str(var_attributes_grid))
@@ -3954,11 +3428,7 @@ class product_product(models.Model):
             return warningobj.info( title='MELI WARNING', message="La longitud del título ("+str(len(product.meli_title))+") es muy corta o no significativa, escriba un titulo coherente con su marca, modelo, etc...", message_html=product.meli_title )
 
         if ( product.meli_title and len(product.meli_title)>60 ):
-            _msg = ("El título tiene "+str(len(product.meli_title))+" caracteres y MercadoLibre "
-                    "permite un máximo de 60. Acortá el campo 'Nombre del producto en Mercado Libre' "
-                    "(pestaña MercadoLibre del producto). Recordá que el título se puede editar hasta "
-                    "que entre la primera venta.")
-            return warningobj.info( title='MELI WARNING', message=_msg, message_html=product.meli_title )
+            return warningobj.info( title='MELI WARNING', message="La longitud del título ("+str(len(product.meli_title))+") es superior a 60 caracteres.", message_html=product.meli_title )
 
         #_product_post_set_price
         product.set_meli_price(meli=meli,config=config)
@@ -4089,14 +3559,10 @@ class product_product(models.Model):
             product.meli_model = product_tmpl.meli_model
 
         if (product.barcode and not product_tmpl.meli_pub_as_variant and not "GTIN" in attributes_ids):
-            # category-aware: solo mandar GTIN si el barcode es un EAN/GTIN válido
-            # (evita el 400 'Product Identifier [GTIN] invalid format' cuando el
-            #  barcode es en realidad un SKU interno, p.ej. koreautos 'C6536').
-            attribute = product._meli_gtin_attribute(product.barcode, product.meli_category)
-            if attribute:
-                attributes_ids[attribute["id"]] = attribute["value_name"]
-                attributes.append(attribute)
-                _logger.info("attributes:"+str(attributes))
+            attribute = { "id": "GTIN", "value_name": product.barcode }
+            attributes_ids[attribute["id"]] = attribute["value_name"]
+            attributes.append(attribute)
+            _logger.info("attributes:"+str(attributes))
 
         if product.meli_brand and len(product.meli_brand) > 0 and not "BRAND" in attributes_ids:
             attribute = { "id": "BRAND", "value_name": product.meli_brand }
@@ -4154,41 +3620,6 @@ class product_product(models.Model):
                     attributes_ids[_att_id] = _val
                     attributes.append(attribute)
                     _logger.info("seller_package attribute added: "+str(attribute))
-
-        # Product dimensions (item) -> ML WIDTH/HEIGHT/LENGTH, rebuilt as
-        # "<number> <unit>" from the Float value + unit Char. [#424 Deco/KPI]
-        _prod_dim_fields = [
-            ("meli_product_width",  "meli_product_width_unit",  "WIDTH"),
-            ("meli_product_height", "meli_product_height_unit", "HEIGHT"),
-            ("meli_product_length", "meli_product_length_unit", "LENGTH"),
-        ]
-        for _vf, _uf, _att_id in _prod_dim_fields:
-            if _att_id not in attributes_ids:
-                _num = getattr(product, _vf, None) or getattr(product_tmpl, _vf, None)
-                if _num:
-                    _unit = getattr(product, _uf, None) or getattr(product_tmpl, _uf, None)
-                    _nums = ("%g" % _num)  # 1.2 -> '1.2', 120.0 -> '120'
-                    _val = ("%s %s" % (_nums, _unit)) if _unit else _nums
-                    attribute = {"id": _att_id, "value_name": _val}
-                    attributes_ids[_att_id] = _val
-                    attributes.append(attribute)
-                    _logger.info("product dimension attribute added: "+str(attribute))
-
-        # Taxes (often MANDATORY to publish, see #474) -> ML VALUE_ADDED_TAX /
-        # IMPORT_DUTY. Sending them from the imported fields avoids the "missing
-        # conditional required attribute" publish error. [#474 Deco/KPI]
-        _tax_fields = [
-            ("meli_vat", "VALUE_ADDED_TAX"),
-            ("meli_import_duty", "IMPORT_DUTY"),
-        ]
-        for _field, _att_id in _tax_fields:
-            if _att_id not in attributes_ids:
-                _val = getattr(product, _field, None) or getattr(product_tmpl, _field, None)
-                if _val:
-                    attribute = {"id": _att_id, "value_name": str(_val)}
-                    attributes_ids[_att_id] = _val
-                    attributes.append(attribute)
-                    _logger.info("tax attribute added: "+str(attribute))
 
         #_product_post_set_category
         if www_cats:
@@ -4909,19 +4340,16 @@ class product_product(models.Model):
                     product.product_meli_status_active(meli=meli)
 
         except Exception as e:
-            # 26.87 (H1): la excepcion se registraba en meli_stock_error pero la
-            # funcion devolvia {} = EXITO. El llamador marcaba el binding como
-            # publicado y la publicacion salia de la cola sin haberse actualizado.
-            # Ahora el error viaja en el return.
-            _logger.error("product_post_stock > exception error: %s", e, exc_info=True)
+            _logger.info("product_post_stock > exception error")
+            _logger.info(e, exc_info=True)
             error = { 'error': str(e) }
             product.meli_stock_error = str(error)
             product_tmpl.meli_stock_error = product.meli_stock_error
+            pass;
 
-        product.meli_stock_error = str(error) if error else "Ok"
+        product.meli_stock_error = str(error)
         product_tmpl.meli_stock_error = product.meli_stock_error
-        # 26.87 (H1): devolver el error si lo hubo (antes: siempre {}).
-        return error or {}
+        return {}
 
     #update internal product stock based on meli_default_stock_product
     def product_update_stock(self, stock=False, meli=False, config=None):
@@ -5063,43 +4491,6 @@ class product_product(models.Model):
 
         return {}
 
-    def product_post_title(self, context=None, meli=None):
-        # Empuja SOLO el título de la publicación a ML (no el producto completo).
-        # Espejo de product_post_price: PUT /items/{meli_id} { 'title': <titulo> }.
-        # El título es un campo a nivel item (no por variación), asi que el body es
-        # siempre { 'title': title } contra el item padre (meli_id), aun con variaciones.
-        # Devuelve {} en OK, o el rjson con 'error' en falla (para el wizard).
-        context = context or self.env.context
-        company = get_company_selected( self, context=context )
-
-        product = self
-        product_tmpl = self.product_tmpl_id
-
-        if not product.meli_id:
-            return {}
-
-        if not meli:
-            meli = self.env['meli.util'].get_new_instance(company)
-            if meli.need_login():
-                return meli.redirect_login()
-
-        meli_id = product.meli_id
-        # Fuente del título: meli_title del producto -> nombre -> meli_title de la plantilla
-        title = product.meli_title or product.name or (product_tmpl and product_tmpl.meli_title)
-        if not title:
-            _logger.error("product_post_title: título vacío para meli_id:"+str(meli_id))
-            return {}
-
-        _logger.info("product_post_title (single) /items/"+str(meli_id)+" title:"+str(title))
-        response = meli.put_mini("/items/"+str(meli_id), { 'title': title }, {'access_token':meli.access_token})
-        if response:
-            rjson = response.json()
-            if rjson and "error" in rjson:
-                _logger.error("product_post_title error /items/"+str(meli_id)+": "+str(rjson))
-                return rjson
-            _logger.info("Posted title ok (single) /items/"+str(meli_id)+": "+str(title))
-        return {}
-
     def get_title_for_meli(self):
         return self.name
 
@@ -5192,18 +4583,6 @@ class product_product(models.Model):
     meli_seller_package_length = fields.Char(string="Largo del paquete [vendedor]", help="SELLER_PACKAGE_LENGTH: Largo del paquete a enviar. Ej: '40 cm'")
     meli_seller_package_weight = fields.Char(string="Peso del paquete [vendedor]", help="SELLER_PACKAGE_WEIGHT: Peso del paquete a enviar. Ej: '500 g'")
 
-    # Product dimensions (item, NOT package) from ML WIDTH/HEIGHT/LENGTH. Mirror
-    # of the same fields on product.template; the import fills both. [#424 Deco/KPI]
-    meli_product_width = fields.Float(string="Ancho del producto", help="Atributo WIDTH de la publicación (valor numérico).")
-    meli_product_width_unit = fields.Char(string="Unidad ancho", help="Unidad del atributo WIDTH tal como la envía ML (ej. 'm', 'cm').")
-    meli_product_height = fields.Float(string="Alto del producto", help="Atributo HEIGHT de la publicación (valor numérico).")
-    meli_product_height_unit = fields.Char(string="Unidad alto", help="Unidad del atributo HEIGHT tal como la envía ML (ej. 'm', 'cm').")
-    meli_product_length = fields.Float(string="Largo del producto", help="Atributo LENGTH de la publicación (valor numérico).")
-    meli_product_length_unit = fields.Char(string="Unidad largo", help="Unidad del atributo LENGTH tal como la envía ML (ej. 'm', 'cm').")
-
-    meli_vat = fields.Char(string="IVA [meli]", help="Atributo VALUE_ADDED_TAX de la publicación (ej. '21 %').")
-    meli_import_duty = fields.Char(string="Impuesto interno [meli]", help="Atributo IMPORT_DUTY de la publicación (ej. '0 %').")
-
     meli_full_update = fields.Datetime(string="Product update",index=True)
     meli_image_update = fields.Datetime(string="Image update",index=True)
     meli_price_update = fields.Datetime(string="Price update",index=True)
@@ -5212,112 +4591,15 @@ class product_product(models.Model):
     # NOTE: This field is NOT automatically recomputed on stock_move_ids changes
     # to avoid serialization errors during high-volume order processing.
     # Use process_meli_stock_moves_update() or cron to update this field.
-    # -------------------------------------------------------------------------
-    # 26.87 (F1) — "sello" de último movimiento de stock
-    #
-    # ANTES se usaba MAX(stock_move.create_date). Eso es un BUG: create_date es
-    # la fecha en que se CREO la fila, no en que el stock cambio. Consecuencias
-    # medidas en produccion (OrgVit 475, 28-jul-2026):
-    #
-    #   * El maximo SE CONGELA en cuanto deja de crearse movimientos nuevos.
-    #     Como `stock_update` se sella en CADA push, la condicion de cola
-    #     (meli_stock_moves_update > stock_update, ver mercadolibre.product
-    #     _meli_stock_status) deja de cumplirse PARA SIEMPRE: el binding queda
-    #     'updated', fuera de la cola, sin error y sin log. Drift silencioso.
-    #   * Todo cambio de stock que no crea una fila nueva queda invisible:
-    #     validar un move creado dias antes (209 casos en 60 dias en una sola
-    #     cuenta), reservar/desreservar, cancelar, editar la cantidad.
-    #
-    # AHORA el sello es GREATEST(date, write_date, create_date):
-    #   - `date`       : fecha efectiva del movimiento, solo si state='done'
-    #                    (en los no-'done' `date` es una fecha PREVISTA, futura,
-    #                    y adelantaria el sello a un evento que no ocurrio).
-    #   - `write_date` : capta transiciones de estado sobre movimientos ya
-    #                    existentes — validar, reservar/desreservar, cancelar —
-    #                    que es justo lo que create_date no veia.
-    #   - `create_date`: piso historico, para no perder el comportamiento viejo.
-    # GREATEST de Postgres ignora los NULL, asi que no hace falta COALESCE.
-    _MELI_MOVE_STAMP_SQL = (
-        "GREATEST("
-        " CASE WHEN state = 'done' THEN date ELSE NULL END,"
-        " write_date,"
-        " create_date"
-        ")"
-    )
-
-    def _meli_move_stamps_by_product(self, product_ids):
-        """Devuelve {product_id: sello} con el ultimo movimiento relevante de cada
-        producto. Una sola query agregada (antes se iteraba stock_move_ids en
-        Python, que en productos con miles de movimientos es carisimo)."""
-        stamps = {}
-        ids = tuple(pid for pid in set(product_ids or []) if pid)
-        if not ids:
-            return stamps
-        # Este metodo se llama desde los hooks de stock_move: si el ORM todavia
-        # tiene la escritura en cache, la SQL no la veria. Flusheamos SOLO
-        # stock.move (otro modelo: no puede recursar sobre el campo que estamos
-        # calculando). Defensivo por si cambia la API entre versiones de Odoo.
-        try:
-            self.env['stock.move'].flush_model(
-                ['product_id', 'state', 'date', 'write_date', 'create_date'])
-        except Exception:
-            pass
-        self.env.cr.execute(
-            "SELECT product_id, MAX(" + self._MELI_MOVE_STAMP_SQL + ") "
-            "FROM stock_move WHERE product_id IN %s GROUP BY product_id",
-            (ids,)
-        )
-        for pid, stamp in self.env.cr.fetchall():
-            if stamp:
-                stamps[pid] = stamp
-        return stamps
-
-    def _meli_stored_moves_stamps(self, product_ids):
-        """Lee el meli_stock_moves_update YA GUARDADO, por SQL.
-
-        Por SQL a proposito: este helper se usa DENTRO del compute del propio
-        campo, y leerlo por ORM ahi dispararia el recomputo del campo que estamos
-        calculando. El valor de la base es ademas justo el que necesitamos: el
-        anterior, contra el que comparamos para no retroceder."""
-        stored = {}
-        ids = tuple(pid for pid in set(product_ids or []) if pid)
-        if not ids:
-            return stored
-        self.env.cr.execute(
-            "SELECT id, meli_stock_moves_update FROM product_product WHERE id IN %s",
-            (ids,)
-        )
-        for pid, stamp in self.env.cr.fetchall():
-            stored[pid] = stamp
-        return stored
-
-    def _meli_write_moves_stamp(self, new_stamp, current=None):
-        """Escribe meli_stock_moves_update SIN RETROCEDER (F1b).
-
-        El campo tiene que ser monotono. Si no lo fuera, una pasada de
-        recomputo puede pisar hacia atras el NOW() que escriben por SQL los
-        hooks de cancel/unreserve (meli_oerp_multiple/models/stock_move.py) y
-        ANULAR una entrada de cola pendiente: el binding volveria a 'updated'
-        sin haberse publicado nunca. Es exactamente el bug que perseguimos, en
-        version sutil.
-
-        `current` se pasa desde afuera (leido por SQL): NO se puede leer el campo
-        por ORM aca, porque este helper corre dentro de su propio compute."""
-        self.ensure_one()
-        if new_stamp and current and current >= new_stamp:
-            return  # ya tenemos un sello igual o mas nuevo: no retroceder
-        if not new_stamp and current:
-            return  # sin candidato nuevo, conservamos el que hay
-        self.meli_stock_moves_update = new_stamp or False
-
     @api.depends()  # Empty depends - prevents automatic recompute on stock_move_ids
     def _meli_stock_moves_update( self ):
-        _stored = self._meli_stored_moves_stamps(self.ids)
         for var in self:
-            # Productos cuyo movimiento nos interesa: el propio + los componentes
-            # de sus BoM (un kit no tiene movimientos propios: su stock sale de
-            # los componentes, ver meli_oerp_stock._meli_available_quantity).
-            related_ids = {var.id}
+            # Collect all relevant create_dates directly (more efficient than recordset operations)
+            move_dates = []
+
+            # Get direct product moves
+            if var.stock_move_ids:
+                move_dates.extend([m.create_date for m in var.stock_move_ids if m.create_date])
 
             # Check KIT/BOM components for their moves
             if "mrp.bom" in self.env:
@@ -5333,12 +4615,12 @@ class product_product(models.Model):
                         continue
                     # Collect component moves
                     for bm_line_id in bom_id.bom_line_ids:
-                        if bm_line_id.product_id:
-                            related_ids.add(bm_line_id.product_id.id)
+                        bm_pr_id = bm_line_id.product_id
+                        if bm_pr_id and bm_pr_id.stock_move_ids:
+                            move_dates.extend([m.create_date for m in bm_pr_id.stock_move_ids if m.create_date])
 
-            stamps = self._meli_move_stamps_by_product(related_ids)
-            var._meli_write_moves_stamp(max(stamps.values()) if stamps else False,
-                                        current=_stored.get(var.id))
+            # Use max() instead of sorted()[0] - O(n) vs O(n log n)
+            var.meli_stock_moves_update = max(move_dates) if move_dates else False
 
     # Threshold for switching to SQL-only mode (skip ORM for large batches)
     MELI_LARGE_BATCH_THRESHOLD = 100
@@ -5428,17 +4710,31 @@ class product_product(models.Model):
 
         # Step 4: Pre-fetch ALL stock moves for all components in one query
         t2 = time.time()
-        # 26.87 (F1c): mismo sello que _meli_stock_moves_update
-        # (GREATEST(date si done, write_date, create_date)), no MAX(create_date).
-        component_latest_moves = self._meli_move_stamps_by_product(component_ids)
+        component_latest_moves = {}
+        if component_ids:
+            self.env.cr.execute("""
+                SELECT product_id, MAX(create_date) as latest_date
+                FROM stock_move
+                WHERE product_id IN %s AND create_date IS NOT NULL
+                GROUP BY product_id
+            """, (tuple(component_ids),))
+            for row in self.env.cr.fetchall():
+                component_latest_moves[row[0]] = row[1]
 
         # Step 5: Pre-fetch latest moves for direct products
-        product_latest_moves = self._meli_move_stamps_by_product(self.ids)
+        product_latest_moves = {}
+        self.env.cr.execute("""
+            SELECT product_id, MAX(create_date) as latest_date
+            FROM stock_move
+            WHERE product_id IN %s AND create_date IS NOT NULL
+            GROUP BY product_id
+        """, (tuple(self.ids),))
+        for row in self.env.cr.fetchall():
+            product_latest_moves[row[0]] = row[1]
         t2_end = time.time()
 
         # Step 6: Calculate meli_stock_moves_update for each product
         t3 = time.time()
-        _stored = self._meli_stored_moves_stamps(self.ids)
         for var in self:
             move_dates = []
 
@@ -5453,9 +4749,7 @@ class product_product(models.Model):
                     if line.product_id and line.product_id.id in component_latest_moves:
                         move_dates.append(component_latest_moves[line.product_id.id])
 
-            # 26.87 (F1b): monotono — nunca retroceder.
-            var._meli_write_moves_stamp(max(move_dates) if move_dates else False,
-                                        current=_stored.get(var.id))
+            var.meli_stock_moves_update = max(move_dates) if move_dates else False
         t3_end = time.time()
 
         _logger.info(
@@ -5493,13 +4787,9 @@ class product_product(models.Model):
             t_chunk = time.time()
 
             # SQL UPDATE for products - set meli_stock_moves_update to NOW()
-            # 26.87 (F1b): GREATEST(actual, NOW()) — el campo es monotono.
-            # NOW() ya es lo mas nuevo posible, pero dejarlo explicito evita que
-            # un reloj corrido o un valor futuro escrito por otra via retrocedan.
             self.env.cr.execute("""
                 UPDATE product_product
-                SET meli_stock_moves_update = GREATEST(
-                        meli_stock_moves_update, NOW() AT TIME ZONE 'UTC')
+                SET meli_stock_moves_update = NOW() AT TIME ZONE 'UTC'
                 WHERE id IN %s
             """, (tuple(chunk_ids),))
 

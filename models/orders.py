@@ -91,18 +91,6 @@ except ImportError:
     psycopg2_errors = None
 from .versions import *
 
-
-def _meli_norm_name(s):
-    """Normaliza un nombre para comparar: minúsculas, sin acentos, espacios colapsados.
-    Se usa para deduplicar nombre/apellido que ML manda REPETIDOS en compradores empresa
-    sin persona de contacto (BUG-011)."""
-    import unicodedata
-    s = (s or '').lower().strip()
-    s = unicodedata.normalize('NFD', s)
-    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
-    return re.sub(r'\s+', ' ', s)
-
-
 class sale_order_line(models.Model):
     _inherit = "sale.order.line"
 
@@ -115,31 +103,6 @@ class sale_order(models.Model):
 
     meli_order_id =  fields.Char(string='Meli Order Id',index=True)
     meli_orders = fields.Many2many('mercadolibre.orders',string="ML Orders")
-
-    # Post-sale buyer messages sin leer, reflejado desde la orden ML. [#499]
-    # NOTA: no puede ser `related` (meli_orders es Many2many, no Many2one; un
-    # related no puede atravesar un x2many). Se computa igual que meli_status
-    # más abajo, tomando la primera orden ML relacionada. Dos compute methods
-    # separados (no uno compartido) porque difieren en `store`: Odoo 19 avisa
-    # ("inconsistent store/compute_sudo") si un mismo compute alimenta un
-    # campo store=True y otro store=False.
-    meli_unread_messages = fields.Integer(
-        string="Mensajes ML sin leer", compute='_compute_meli_unread_messages',
-        store=True, readonly=True)
-    meli_messages_link = fields.Char(
-        string="Mensajes en ML", compute='_compute_meli_messages_link', readonly=True)
-
-    @api.depends('meli_orders.meli_unread_messages')
-    def _compute_meli_unread_messages(self):
-        for order in self:
-            morder = order.meli_orders and order.meli_orders[0]
-            order.meli_unread_messages = morder.meli_unread_messages if morder else 0
-
-    @api.depends('meli_orders.meli_messages_link')
-    def _compute_meli_messages_link(self):
-        for order in self:
-            morder = order.meli_orders and order.meli_orders[0]
-            order.meli_messages_link = morder.meli_messages_link if morder else False
 
     MELI_STATUS_LABELS = {
         "paid ship-ready_to_shipprinted":        "Etiqueta impresa",
@@ -235,8 +198,6 @@ class sale_order(models.Model):
             so.meli_order = False
             so.meli_buyer = False
             so.meli_buyer_name = False
-            so.meli_buyer_nickname = False
-            so.meli_buyer_id = False
 
             meli_order = so.meli_orders and so.meli_orders[0]
             if meli_order:
@@ -245,16 +206,10 @@ class sale_order(models.Model):
                 if meli_buyer:
                     so.meli_buyer = meli_buyer
                     so.meli_buyer_name = meli_buyer and meli_buyer.name
-                    so.meli_buyer_nickname = meli_buyer and meli_buyer.nickname
-                    so.meli_buyer_id = meli_buyer and meli_buyer.buyer_id
 
     meli_order = fields.Many2one( 'mercadolibre.orders',string="Meli Orden", compute="_get_meli_order", store=True, index=True )
     meli_buyer =  fields.Many2one( "mercadolibre.buyers",string="Meli Comprador", compute="_get_meli_order", store=True, index=True)
     meli_buyer_name =  fields.Char( string="Meli Comprador Nombre", compute="_get_meli_order", search=_search_meli_buyer_name, store=True, index=True )
-    # Nickname e ID del comprador ML, almacenados+indexados en la propia sale.order para
-    # poder buscarlos/filtrarlos directo (ej. nickname "VIEIROBRIAN20210623234209", id "780371376").
-    meli_buyer_nickname = fields.Char( string="Meli Comprador Nickname", compute="_get_meli_order", store=True, index=True )
-    meli_buyer_id = fields.Char( string="Meli Comprador ID", compute="_get_meli_order", store=True, index=True )
 
     meli_status = fields.Selection( [
         #Initial state of an order, and it has no payment yet.
@@ -305,12 +260,6 @@ class sale_order(models.Model):
     meli_shipment = fields.Many2one('mercadolibre.shipment',string='Meli Shipment Obj')
     meli_shipment_pdf_file = fields.Binary(string='Pdf File',attachment=True, related="meli_shipment.pdf_file",readonly=True)
     meli_shipment_pdf_filename = fields.Char(string='Pdf Filename',related="meli_shipment.pdf_filename",readonly=True)
-    # Zona del receiver (comprador) expuesta en la propia orden para buscar/filtrar/agrupar.
-    # Almacenados+indexados desde el envío (mercadolibre.shipment).
-    meli_receiver_state = fields.Char(string="ML Receiver Provincia", related="meli_shipment.receiver_state", store=True, index=True, readonly=True)
-    meli_receiver_city = fields.Char(string="ML Receiver Localidad", related="meli_shipment.receiver_city", store=True, index=True, readonly=True)
-    meli_receiver_neighborhood = fields.Char(string="ML Receiver Barrio", related="meli_shipment.receiver_neighborhood", store=True, index=True, readonly=True)
-    meli_receiver_zip_code = fields.Char(string="ML Receiver CP", related="meli_shipment.receiver_zip_code", store=True, index=True, readonly=True)
     meli_shipment_logistic_type = fields.Char(string="Logistic Type",index=True)
     meli_update_forbidden = fields.Boolean(string="Bloqueado para actualizar desde ML",default=False, index=True)
 
@@ -644,21 +593,17 @@ class sale_order(models.Model):
                         # No se pudo revertir: la orden NO debe cancelarse automáticamente.
                         # El usuario debe crear una Nota de Crédito manualmente desde la factura.
                         _has_unresolved_posted_invoice = True
-                        # once_key en los dos: el cron reintenta mientras la orden no se
-                        # pueda cancelar, así que sin marca este par se repostea por siempre.
-                        meli_message_post(
-                            invoice,
-                            cancel_msg + " — ⚠️ ACCIÓN REQUERIDA: esta factura no pudo revertirse a borrador. "
+                        invoice.message_post(
+                        body=cancel_msg + " — ⚠️ ACCIÓN REQUERIDA: esta factura no pudo revertirse a borrador. "
                             "Debe crear una NOTA DE CRÉDITO manualmente para reversarla. "
                             "La orden de venta NO fue cancelada automáticamente para permitir la gestión.",
-                            once_key="cancel-inv-noretract-%s" % invoice.id,
+                        message_type=order_message_type
                         )
-                        meli_message_post(
-                            self,
-                            "⚠️ Cancelación de ML pendiente: factura %s publicada no pudo revertirse. "
+                        self.message_post(
+                        body="⚠️ Cancelación de ML pendiente: factura %s publicada no pudo revertirse. "
                             "Crear nota de crédito desde la factura y luego cancelar la orden manualmente. "
                             "Motivo ML: %s" % (invoice.name, cancel_msg),
-                            once_key="cancel-so-noretract-%s" % invoice.id,
+                        message_type=order_message_type
                         )
                 elif invoice.state == 'draft':
                     try:
@@ -671,19 +616,14 @@ class sale_order(models.Model):
         posted_invoices = self.invoice_ids.filtered(lambda inv: inv.state == 'posted' and inv.move_type == 'out_invoice')
         if posted_invoices:
             _has_unresolved_posted_invoice = True
-            # once_key por juego de facturas: este aviso se emitía en CADA pasada del cron
-            # (que reintenta mientras la orden no se pueda cancelar) — era la otra mitad del
-            # spam del chatter. Con la marca se postea una vez; si después aparece otra
-            # factura publicada, la clave cambia y se vuelve a avisar.
-            meli_message_post(
-                self,
-                "⚠️ Cancelación de ML pendiente: %d factura(s) publicada(s) sin resolver (%s). "
-                "Gestionar manualmente. Motivo ML: %s" % (
+            self.message_post(
+                body="⚠️ Cancelación de ML pendiente: %d factura(s) publicada(s) sin resolver (%s). "
+                     "Gestionar manualmente. Motivo ML: %s" % (
                     len(posted_invoices),
                     ", ".join(posted_invoices.mapped('name')),
                     cancel_msg
                 ),
-                once_key="cancel-posted-inv-%s" % "_".join(str(i) for i in sorted(posted_invoices.ids)),
+                message_type=order_message_type
             )
 
         if _has_unresolved_posted_invoice:
@@ -803,68 +743,25 @@ class sale_order(models.Model):
                 continue
             try:
                 wiz = ReturnWiz.with_context(active_id=picking.id, active_ids=[picking.id], active_model="stock.picking").create({})
-                # --- Poblar las líneas del wizard (Odoo 16.0) -------------------------------
-                # En 16.0 `product_return_moves` se llena en @api.onchange('picking_id')
-                # (core stock/wizard/stock_picking_return.py) y los onchange NO corren en
-                # create() -> el wizard nace VACÍO y _create_returns() tira siempre
-                # "Please specify at least one non-zero quantity.". O sea: en 16.0 la
-                # devolución automática nunca funcionó, y el cron reintentaba para siempre.
-                # En 17.0+ el mismo campo es compute+store (depends='picking_id'), así que
-                # ya viene poblado y este bloque no hace nada.
-                if "product_return_moves" in wiz._fields and not wiz.product_return_moves:
-                    if hasattr(wiz, "_onchange_picking_id"):
-                        wiz._onchange_picking_id()
-                if hasattr(wiz, "action_create_returns_all"):
-                    # Odoo 18+: el core ya NO precalcula product_return_moves.quantity
-                    # (siempre nace en 0 — ver stock/wizard/stock_picking_return.py
-                    # _prepare_stock_return_picking_line_vals_from_move). Ese cálculo
-                    # ("entregado - ya devuelto") se movió a action_create_returns_all(),
-                    # que hay que llamar en vez de action_create_returns() directo o
-                    # SIEMPRE da "Especifique al menos una cantidad diferente a cero"
-                    # (visto en prod: picking done con qty entregada > 0, no un caso FULL
-                    # sin stock real). El guard de cantidad-cero pasa a mirar la cantidad
-                    # ENTREGADA en los moves originales (no product_return_moves, que acá
-                    # siempre es 0) para seguir saltando limpio los casos sin nada real
-                    # que devolver.
-                    if not sum(picking.move_ids.filtered(lambda m: m.state != "cancel" and not m.scrapped).mapped("quantity")):
-                        _logger.info("Return omitida para %s: sin cantidades entregadas a devolver.", picking.name)
-                        continue
-                    wiz.action_create_returns_all()
-                elif hasattr(wiz, "action_create_returns"):
-                    # RAMA MUERTA (dejada por compatibilidad si algún core la expone sola).
-                    # Verificado contra el core de las 4 versiones: 18.0/19.0 tienen
-                    # action_create_returns Y action_create_returns_all -> gana la rama de
-                    # arriba; 16.0/17.0 no tienen ninguna de las dos -> caen a create_returns.
-                    # Nadie pasa por acá. El guard queda igual que arriba por las dudas.
-                    if "product_return_moves" in wiz._fields and not sum(wiz.product_return_moves.mapped("quantity")):
-                        _logger.info("Return omitida para %s: sin cantidades a devolver (FULL).", picking.name)
-                        continue
+                # Guard cantidad-cero: si el wizard no calculó nada a devolver, no intentar
+                # (action_create_returns tiraría 'Especifique al menos una cantidad diferente a
+                # cero' y el cron lo reintentaría en bucle). Típico de pickings FULL cuyo stock
+                # vive en el fulfillment de ML.
+                if "product_return_moves" in wiz._fields and not sum(wiz.product_return_moves.mapped("quantity")):
+                    _logger.info("Return omitida para %s: sin cantidades a devolver (FULL).", picking.name)
+                    continue
+                if hasattr(wiz, "action_create_returns"):
                     wiz.action_create_returns()
                 elif hasattr(wiz, "create_returns"):
-                    # Odoo 16.0/17.0: acá llegan de verdad. product_return_moves.quantity ya
-                    # viene precalculado (compute en 17.0, onchange forzado arriba en 16.0).
-                    # MISMO guard de cantidad-cero que las otras ramas: sin esto,
-                    # create_returns() tira 'Especifique al menos una cantidad diferente a
-                    # cero' y el cron reintenta cada ~5 min PARA SIEMPRE (visto en prod:
-                    # 514 ERROR/día y 2047 mensajes de spam en el chatter de 2 órdenes).
-                    # Típico de pickings FULL cuyo stock vive en el fulfillment de ML.
-                    if "product_return_moves" in wiz._fields and not sum(wiz.product_return_moves.mapped("quantity")):
-                        _logger.info("Return omitida para %s: sin cantidades a devolver (FULL).", picking.name)
-                        continue
                     wiz.create_returns()
                 else:
                     _logger.warning("stock.return.picking: no create_returns method found")
-                    meli_message_post(self, "No se pudo devolver el albarán %s automáticamente: método no encontrado. Gestionar manualmente." % picking.name,
-                                      once_key="ret-nomethod-%s" % picking.id)
+                    meli_message_post(self, "No se pudo devolver el albarán %s automáticamente: método no encontrado. Gestionar manualmente." % picking.name)
                     continue
                 meli_message_post(self, "Devolución creada automáticamente para albarán %s (orden cancelada por MeLi)." % picking.name)
             except Exception as e:
                 _logger.error("Error creating return for picking %s: %s", picking.name, e, exc_info=True)
-                # once_key: este camino lo dispara un cron que reintenta indefinidamente
-                # mientras la orden no se pueda cancelar. Sin la marca, el mismo aviso se
-                # repostea en cada ciclo (era la mitad del spam del chatter).
-                meli_message_post(self, "No se pudo devolver el albarán %s automáticamente. Error: %s. Gestionar manualmente." % (picking.name, str(e)),
-                                  once_key="ret-error-%s" % picking.id)
+                meli_message_post(self, "No se pudo devolver el albarán %s automáticamente. Error: %s. Gestionar manualmente." % (picking.name, str(e)))
 
     def meli_confirm_ready( self, meli=None, config=None ):
         """Evalúa, SIN efectos secundarios, si la venta ML está lista para confirmar.
@@ -963,15 +860,7 @@ class sale_order(models.Model):
             confirm_ready, serror = self.meli_confirm_ready( meli=meli, config=config )
             confirm_cond = confirm_ready
             if not confirm_cond:
-                # FIX #415 (NipSkin/Inity 520, tickets #414/#415): evitar spam en chatter.
-                # El cron reintenta la orden cada ciclo (afecta ordenes con amount_total=0 sin
-                # lineas) y re-posteaba siempre. Postear solo si no hay ya un "Condition not met"
-                # en los ultimos ~5 mensajes.
-                _recent_cond = self.message_ids[:5].filtered(
-                    lambda m: m.body and "Condition not met" in (m.body or "")
-                )
-                if not _recent_cond:
-                    meli_message_post(self, serror, config=config)
+                meli_message_post(self, serror, config=config)
                 return {'error': serror}
 
             if (self.state in ['draft']):
@@ -1636,13 +1525,8 @@ class mercadolibre_orders(models.Model):
         last_name = str( ('last_name' in Buyer and Buyer['last_name']) or '' )
 
         if first_name and last_name:
-            # BUG-011: ML manda la razón social REPETIDA en first_name y last_name para
-            # compradores empresa sin persona de contacto → no duplicar el nombre.
-            if _meli_norm_name(first_name) == _meli_norm_name(last_name):
-                last_name = ''
-            else:
-                first_name = first_name.capitalize()
-                last_name = ' '+last_name.capitalize()
+            first_name = first_name.capitalize()
+            last_name = ' '+last_name.capitalize()
 
         full_name = first_name + last_name
 
@@ -2126,7 +2010,6 @@ class mercadolibre_orders(models.Model):
             'meli_currency_id': ("currency_id" in order_json and order_json["currency_id"]),
             'meli_date_created': ml_datetime(order_json["date_created"]),
             'meli_date_closed': ml_datetime(order_json["date_closed"]),
-            'date_order': ml_datetime(order_json["date_closed"]) or ml_datetime(order_json["date_created"]),
         }
         return meli_order_fields
 
@@ -2271,11 +2154,7 @@ class mercadolibre_orders(models.Model):
             rjson = response and response.json()            
         tax_found = False
         if rjson:
-            # Guard: some /items/{id} responses (e.g. deleted/restricted listings
-            # referenced by pack sub-orders) come back without an "attributes"
-            # key at all, raising KeyError('attributes') and aborting the whole
-            # notification (loops every ~45s via the notification cron retry).
-            for att in (rjson.get('attributes') or []):
+            for att in rjson['attributes']:
                 # att["name"] == "IVA"
                 if att["id"] == "VALUE_ADDED_TAX":
                     tax_found = True
@@ -2301,8 +2180,7 @@ class mercadolibre_orders(models.Model):
 
         tax_found = False
         if rjson:
-            # Guard: see fetchIVA() above - some /items/{id} responses lack "attributes".
-            for att in (rjson.get('attributes') or []):
+            for att in rjson['attributes']:
                 # att["name"] == "Impuesto interno"
                 if att["id"] == "IMPORT_DUTY":
                     tax_found = True
@@ -2511,9 +2389,7 @@ class mercadolibre_orders(models.Model):
             billing_full_name = ''
             if _billing_fn:
                 billing_full_name = _billing_fn.strip().title()
-                # BUG-011: no concatenar el apellido si ML lo manda igual al nombre
-                # (razón social repetida en FIRST_NAME y LAST_NAME de billing_info).
-                if _billing_ln and _meli_norm_name(_billing_ln) != _meli_norm_name(_billing_fn):
+                if _billing_ln:
                     billing_full_name += ' ' + _billing_ln.strip().title()
             billing_full_name = billing_full_name or _billing_bn or self.buyer_full_name(Buyer)
             Receiver = False
@@ -4074,7 +3950,7 @@ class mercadolibre_orders(models.Model):
                                 'meli_id': Item['item']['id'],
                                 'meli_pub': True,
                             }
-                            product_related.sudo().write((prod_fields))  # bind meli_id con privilegios (cron Vendedor ML sin grupo productos)
+                            product_related.write((prod_fields))
                             if (product_related.product_tmpl_id):
                                 product_related.product_tmpl_id.meli_pub = True
                             product_related.product_meli_get_product()
@@ -4123,8 +3999,7 @@ class mercadolibre_orders(models.Model):
                                 #prod_fields['default_code'] = rjson3['id']
                                 #productcreated = False
                                 if seller_sku and config.mercadolibre_create_product_from_order and not productcreated:
-                                    # sudo: crear el producto on-the-fly al importar una orden es una INTEGRACIÓN DE SISTEMA, no una acción de usuario. El cron puede correr como el Vendedor ML (with_user) que NO tiene grupo de creación de productos → sin sudo lanza AccessError (product.template/product.product). Gate de negocio: config.mercadolibre_create_product_from_order.
-                                    productcreated = self.env['product.product'].sudo().create((prod_fields))
+                                    productcreated = self.env['product.product'].create((prod_fields))
                                 if (productcreated):
                                     if (productcreated.product_tmpl_id):
                                         productcreated.product_tmpl_id.meli_pub = True
@@ -4185,15 +4060,6 @@ class mercadolibre_orders(models.Model):
                     'seller_custom_field': ('seller_custom_field' in Item['item'] and Item['item']['seller_custom_field']) or '',
                     'sale_fee': ("sale_fee" in Item and Item["sale_fee"]) or 0.0
                 }
-
-                # CAPTURA depósito ML por ítem (surtido multi-almacén): la orden trae el
-                # nodo logístico de origen en Item['stock'] = {store_id, node_id}. Se persiste
-                # para el ruteo entrante en _meli_get_stock_location_from_mapping (meli_oerp_stock).
-                _item_stock = ("stock" in Item and isinstance(Item.get("stock"), dict) and Item["stock"]) or {}
-                if ("meli_stock_node_id" in order_items_obj._fields):
-                    order_item_fields['meli_stock_node_id'] = _item_stock.get("node_id") or ''
-                if ("meli_stock_store_id" in order_items_obj._fields):
-                    order_item_fields['meli_stock_store_id'] = _item_stock.get("store_id") or ''
 
                 order.fee_amount = order_item_fields["sale_fee"] or 0.0
 
@@ -4286,16 +4152,7 @@ class mercadolibre_orders(models.Model):
                         'sku_raw': _item_sku or _item_meli_id,
                     }
                     if sorder:
-                        # FIX #415 (NipSkin/Inity 520, tickets #414/#415): evitar spam en chatter.
-                        # Postear "PRODUCTO NO ENCONTRADO" una sola vez por item ML: el cron de
-                        # import re-procesa la orden cada ciclo y re-posteaba el mismo aviso.
-                        # Slice acotado por performance (no recorrer miles de mensajes).
-                        _missing_seen = sorder.message_ids[:50].filtered(
-                            lambda m: m.body and "PRODUCTO NO ENCONTRADO" in (m.body or "")
-                            and _item_meli_id in (m.body or "")
-                        )
-                        if not _missing_seen:
-                            meli_message_post(sorder, _missing_html, config=config)
+                        meli_message_post(sorder, _missing_html, config=config)
 
                 #Short cut to meli id and sku
                 order._order_product_sku()
@@ -4535,19 +4392,13 @@ class mercadolibre_orders(models.Model):
         if order and order.coupon_amount and sorder:
             if not sorder.meli_coupon_amount:
                 sorder.meli_coupon_amount = order.coupon_amount
-            # Modo de facturación del cupón ML (tri-estado meli_coupon_invoice_mode):
-            #   full (default): NO se imputa a ninguna línea → factura a precio pleno. Correcto
-            #       cuando ML reembolsa el cupón al vendedor (made-whole). [#433 Elvimarta]
-            #   product_discount: cupón como descuento (%) sobre líneas de PRODUCTO (= flag ON).
-            #   separate_line: cupón como línea(s) de descuento separada(s) por grupo de impuesto
-            #       (OPT-IN, riesgos AFIP/CL — validar antes de habilitar).
-            # El FIX #399 forzaba product_discount aun con el flag OFF cuando el comprador pagaba
-            # el flete entero; eso pisaba la preferencia del cliente (regresión #433). Ahora el
-            # reparto depende SOLO del modo declarado en la config.
-            _coupon_mode = meli_resolve_coupon_invoice_mode(config)
-            _so_editable = sorder.state not in ('done',) and not ("locked" in sorder._fields and sorder.locked)
-            if _coupon_mode == 'product_discount':
-                if _so_editable:
+            _apply_coupon_discount = (
+                config
+                and "meli_coupon_discount_on_invoice" in config._fields
+                and config.meli_coupon_discount_on_invoice
+            )
+            if _apply_coupon_discount:
+                if sorder.state not in ('done',) and not ("locked" in sorder._fields and sorder.locked):
                     non_delivery_lines = sorder.order_line.filtered(lambda l: not l.is_delivery)
                     total_gross = 0.0
                     for line in non_delivery_lines:
@@ -4566,12 +4417,9 @@ class mercadolibre_orders(models.Model):
                             discount_pct, order.coupon_amount, total_gross,
                             len(non_delivery_lines), sorder.name,
                         )
-            elif _coupon_mode == 'separate_line':
-                if _so_editable:
-                    meli_apply_coupon_separate_line(sorder, order.coupon_amount)
             else:
-                # modo 'full': sin descuento. Limpiar cualquier descuento de cupón previo.
-                if _so_editable:
+                # Sin descuento: si había un descuento previo de cupón, limpiarlo.
+                if sorder.state not in ('done',) and not ("locked" in sorder._fields and sorder.locked):
                     non_delivery_lines = sorder.order_line.filtered(lambda l: not l.is_delivery)
                     total_gross = 0.0
                     for line in non_delivery_lines:
@@ -4594,10 +4442,9 @@ class mercadolibre_orders(models.Model):
                                 line.discount = 0.0
                                 _logger.info(
                                     "MELI: Removed coupon discount from line %s on SO %s "
-                                    "(coupon_invoice_mode=full)",
+                                    "(meli_coupon_discount_on_invoice=False)",
                                     line.id, sorder.name,
                                 )
-                    meli_remove_coupon_separate_line(sorder)
 
         if (1==1 or config.mercadolibre_cron_get_orders_shipment):
             #_logger.info("Updating order: Shipment: "+str(order.shipping_id))
@@ -4975,124 +4822,7 @@ class mercadolibre_orders(models.Model):
                 order.status_detail = (order_json.get("status_detail") or '') + cancel_detail_text
                 if order.sale_order:
                     order.sale_order.meli_status_detail = order.status_detail
-                    if order_json["status"] in ("cancelled",):
-                        sorder = order.sale_order
-                        if sorder.meli_status != "cancelled":
-                            sorder.meli_status = "cancelled"
-                        if sorder.state in ["draft", "sale", "sent", "done"]:
-                            cancel_msg = "Orden cancelada por MercadoLibre."
-                            if order.status_detail:
-                                cancel_msg += " Motivo: %s" % order.status_detail
-                            sorder.meli_cancel_with_detail(cancel_msg)
-                    else:
-                        order.sale_order.confirm_ml(meli=meli,config=config)
-
-    def orders_resync_status( self, meli=None, config=None, account=None ):
-        """#475 - Re-sincroniza el ESTADO de los pedidos MeLi recientes que siguen
-        ABIERTOS en Odoo, para reflejar cancelaciones (y otros cambios de estado)
-        que el cron de importacion (orders_query_iterate, sort=date_desc) no alcanza
-        cuando la orden es mas vieja que la ventana de las ~50 mas nuevas por creacion.
-
-        Barrido ACOTADO (rate-limit safe): solo pedidos IN-FLIGHT (no entregados —
-        la cancelacion del comprador es pre-entrega) con sale.order NO cancelada, creados
-        en los ultimos N dias (mercadolibre_cron_orders_status_days), con tope
-        mercadolibre_cron_orders_status_limit, ordenados de MAS VIEJO a mas nuevo (las
-        at-risk que el sweep normal date_desc no cubre). Por pedido hace UN GET
-        /orders/<id> (ligero) y solo procesa (confirm_ml / meli_cancel_with_detail)
-        cuando el estado CAMBIO.
-
-        #475 multi-cuenta: `account` (mercadolibre.account) es opcional. Cuando el
-        dispatcher de meli_oerp_multiple lo pasa, el barrido se scopea por esa cuenta
-        (connection_account) y toma la compañia del `config` (connection_configuration).
-        Sin `account` el comportamiento es identico al mono-cuenta historico."""
-        company = self.env.user.company_id
-        if not config:
-            config = company
-        # #475 multi-cuenta: si el config trae su propia compania (connection_configuration
-        # en meli_oerp_multiple), usarla para scopear; si es res.company (mono-cuenta) o no
-        # la expone, se cae al company del usuario del cron (retrocompat total).
-        if config is not None and "company_id" in config._fields and config.company_id:
-            company = config.company_id
-        if not meli:
-            meli = self.env['meli.util'].get_new_instance(company)
-        if not meli or meli.needlogin_state:
-            return {}
-
-        days = 15
-        if "mercadolibre_cron_orders_status_days" in config._fields and config.mercadolibre_cron_orders_status_days:
-            days = config.mercadolibre_cron_orders_status_days
-        query_limit = 500
-        if "mercadolibre_cron_orders_status_limit" in config._fields and config.mercadolibre_cron_orders_status_limit:
-            query_limit = config.mercadolibre_cron_orders_status_limit
-
-        cutoff = fields.Datetime.now() - timedelta(days=days)
-        domain = [
-            ("date_created", ">=", cutoff),
-            ("sale_order", "!=", False),
-            ("sale_order.state", "!=", "cancel"),
-            ("status", "not in", ("cancelled", "invalid")),
-            # #475: la cancelacion por el comprador es SIEMPRE pre-entrega. Una vez
-            # entregada (delivered), la orden ya no es cancelable por esa via, asi que
-            # re-consultarla es gasto de API puro. Excluir delivered concentra el barrido
-            # en las ordenes IN-FLIGHT (empty/pending/ready_to_ship/not_delivered/shipped
-            # = todas las no-entregadas, no se pierde ninguna cancelable) y hace que la
-            # ventana entera sea cubrible en sellers de alto volumen (delivered ~73%).
-            ("shipment_status", "not in", ("delivered",)),
-        ]
-        if "company_id" in self._fields:
-            domain.append(("company_id", "in", (company.id, False)))
-        # #475 multi-cuenta: scope preciso por cuenta ML cuando el dispatcher lo pasa,
-        # para no re-consultar con el token de una cuenta ordenes de otra.
-        if account is not None and "connection_account" in self._fields:
-            domain.append(("connection_account", "=", account.id))
-        # #475: order ASC (mas VIEJAS primero) — son las at-risk que el sweep normal
-        # (orders_query_iterate, date_desc) NO cubre. Complementario: si el limit trunca,
-        # trunca las NUEVAS (ya cubiertas por el sweep normal), nunca las viejas.
-        candidates = self.search(domain, order="date_created asc", limit=query_limit)
-
-        Autocommit(self, False)
-        checked = changed = cancelled = 0
-        for order in candidates:
-            try:
-                response = meli.get("/orders/"+str(order.order_id), {'access_token': meli.access_token})
-                order_json = response.json()
-                checked += 1
-                if "id" not in order_json:
-                    continue
-                new_status = order_json.get("status") or ''
-                if str(order.status) == str(new_status):
-                    # sin cambios -> sin side effects (idempotente, barato: 1 GET)
-                    continue
-                changed += 1
-                cancel_detail = order_json.get("cancel_detail") or {}
-                cancel_detail_text = ""
-                if cancel_detail:
-                    cancel_detail_text = " | %s: %s (solicitado por: %s, fecha: %s)" % (
-                        cancel_detail.get("code", ""),
-                        cancel_detail.get("description", ""),
-                        cancel_detail.get("requested_by", ""),
-                        cancel_detail.get("date", ""),
-                    )
-                order.status = new_status
-                order.status_detail = (order_json.get("status_detail") or '') + cancel_detail_text
-                sorder = order.sale_order
-                if sorder:
-                    sorder.meli_status_detail = order.status_detail
-                    if new_status == "cancelled" and sorder.state in ("draft", "sent", "sale", "done"):
-                        cancel_msg = "Orden cancelada por MercadoLibre."
-                        if sorder.meli_status_detail:
-                            cancel_msg += " Motivo: %s" % sorder.meli_status_detail
-                        sorder.meli_cancel_with_detail(cancel_msg)
-                        cancelled += 1
-                    else:
-                        # otro cambio de estado -> resync completo por ID
-                        order.orders_update_order(meli=meli, config=config)
-                MeliCommit(self)
-            except Exception as e:
-                _logger.error("orders_resync_status > error en orden %s: %s", order.order_id, e, exc_info=True)
-                MeliRollback(self)
-        _logger.info("orders_resync_status: cuenta=%s checked=%s changed=%s cancelled=%s (days=%s limit=%s)", (account and account.name) or "-", checked, changed, cancelled, days, query_limit)
-        return {"checked": checked, "changed": changed, "cancelled": cancelled}
+                    order.sale_order.confirm_ml(meli=meli,config=config)
 
     def _get_config( self, config=None ):
         
@@ -5142,56 +4872,6 @@ class mercadolibre_orders(models.Model):
     order_id = fields.Char(string='Order Id',index=True)
     pack_id = fields.Char(string='Pack Id',index=True)
     sale_order = fields.Many2one('sale.order',string="Sale Order",help='Pedido de venta de Odoo')
-
-    # Post-sale buyer messages: how many UNREAD messages this order has in ML.
-    # Refreshed from GET /messages/unread (role=seller, tag=post_sale). A count
-    # > 0 means the buyer wrote and nobody answered yet. [#499 Deco/KPI]
-    meli_unread_messages = fields.Integer(
-        string="Mensajes sin leer", default=0, index=True, readonly=True,
-        help="Cantidad de mensajes del comprador sin responder en MercadoLibre. "
-             "Se actualiza periódicamente desde MercadoLibre.")
-    meli_messages_link = fields.Char(
-        string="Mensajes en ML", compute="_compute_meli_messages_link",
-        help="Enlace a la conversación de esta venta en MercadoLibre.")
-
-    @api.depends('pack_id', 'order_id')
-    def _compute_meli_messages_link(self):
-        # ML messaging center for a sale; pack_id when the order is part of a
-        # pack (carrito), otherwise the order id.
-        for o in self:
-            ref = o.pack_id or o.order_id
-            o.meli_messages_link = (
-                "https://www.mercadolibre.com.ar/mensajes/%s" % ref) if ref else False
-
-    @api.model
-    def _meli_apply_unread_results(self, results, orders_domain):
-        """Given the `results` array from /messages/unread (each item has a
-        `resource` like '/packs/<id>/sellers/<seller>' and a `count`), set
-        meli_unread_messages on the matching orders. `orders_domain` scopes the
-        reset+update to one account so other accounts are not touched. Orders no
-        longer in the unread list are reset to 0 (they were answered/read).
-        [#499]"""
-        import re as _re
-        by_ref = {}
-        for item in (results or []):
-            if not isinstance(item, dict):
-                continue
-            m = _re.search(r"/packs/([^/]+)/", item.get("resource") or "")
-            if not m:
-                continue
-            try:
-                by_ref[m.group(1)] = int(item.get("count") or 0)
-            except (TypeError, ValueError):
-                continue
-        Orders = self.search(orders_domain)
-        touched = 0
-        for o in Orders:
-            ref = o.pack_id or o.order_id
-            new = by_ref.get(str(ref), 0) if ref else 0
-            if o.meli_unread_messages != new:
-                o.meli_unread_messages = new
-                touched += 1
-        return touched
 
     status = fields.Selection( [
         #Initial state of an order, and it has no payment yet.
@@ -5388,15 +5068,6 @@ class mercadolibre_order_items(models.Model):
     seller_sku = fields.Char(string='SKU',index=True)
     seller_custom_field = fields.Char(string='seller_custom_field',index=True)
     sale_fee = fields.Float(string="Sale Fee",index=True)
-
-    # Surtido multi-almacén: la orden ML trae el depósito logístico de origen a
-    # nivel ítem en Item['stock'] = {store_id, node_id}. Se persiste por línea para
-    # rutear la entrega al warehouse/ubicación Odoo mapeado en
-    # mercadolibre.account.stock_location (network_node_id <- node_id ; meli_store_id <- store_id).
-    meli_stock_node_id = fields.Char(string='ML Stock Node ID', index=True,
-        help='Network node del depósito ML de origen de esta línea (Item.stock.node_id, ej: MXP4397768091).')
-    meli_stock_store_id = fields.Char(string='ML Stock Store ID', index=True,
-        help='Store id del depósito ML de origen de esta línea (Item.stock.store_id).')
 
 
 class mercadolibre_payments(models.Model):
