@@ -12,6 +12,37 @@
 
 ## Errores Resueltos
 
+### ERROR-009: ParseError `Campo desconocido "x_state_sync" en "group_by"` — upgrade de meli_oerp bloqueado por vistas dinámicas de solt_tiendanube `[19.0.testavelia]`
+
+**Reportado:** 2026-08-06
+**Severidad:** Crítica — ParseError fatal que aborta el upgrade/install de meli_oerp
+**Estado:** Resuelto
+
+**Síntomas:**
+```
+ParseError: while parsing .../meli_oerp/views/product_view.xml:49
+Campo desconocido "x_state_sync" en el valor "group_by" en context="{'group_by':'x_state_sync'}"
+View: product.template.search.meli (product_template_search_view_meli) / parent product.product_template_search_view
+```
+El error ocurría al instalar/actualizar `meli_oerp` cuando `solt_tiendanube` (`solt_api_connector`)
+estaba instalado y configurado con vistas dinámicas.
+
+**Causa raíz:**
+`solt_api_connector.make_search_view()` crea en runtime una vista de búsqueda dinámica sobre
+`product.product_template_search_view` (modelo `product.template`) con el filtro
+`context="{'group_by':'x_state_sync'}"`. `meli_oerp` también hereda esa misma vista padre
+(`product_template_search_view_meli`). Al actualizar meli_oerp, `ir.ui.view.write()` ejecuta
+`_check_xml()` **sin** validación parcial (`ir_ui_view_partial_validation` solo se activa en `create()`,
+`ir_ui_view.py:638`), por lo que `validate_view_ids=True` y Odoo 19 valida el arch compuesto **completo**
+(parent + TODAS las extensiones, incluidas las de solt). En `_validate_tag_filter` (`ir_ui_view.py:2177`),
+`x_state_sync` no está en `product.template._fields` (solo existe como campo Python en
+`product.product` y como `ir.model.fields` manual) → ParseError. El `__validate__="0"` de solt solo
+protege la creación de su propia vista, no la validación total disparada por otro módulo.
+
+**Resolución:** Ver `.roots/debug/fixes-log.md` → FIX-014 (raíz en solt + red de seguridad en meli).
+
+---
+
 ### ERROR-005: Descuento de cupón ML calculado con denominador sin IVA — factura por menos de lo pagado `[17.0.elvimarta]`
 
 **Reportado:** 2026-05-08

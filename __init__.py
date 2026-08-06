@@ -14,8 +14,62 @@ _logger = logging.getLogger(__name__)
 
 
 def pre_init_hook(cr):
-    """Pre-init hook compatible with Odoo 14-19"""
-    pass
+    """Pre-init hook compatible with Odoo 14-19.
+
+    EN: Deactivates ALL runtime dynamic views created by solt_api_connector
+        (name pattern 'api.connector') BEFORE meli_oerp's XML data is loaded.
+        solt_api_connector creates dynamic inherited views (form, search, list)
+        that reference custom x_ fields (x_state_sync, x_external_id, ...). When
+        those fields are missing from the model's ORM _fields, Odoo 19's strict
+        validator fails while re-validating the composed view shared with
+        meli_oerp, raising:
+            ParseError: Unknown field "x_state_sync" in "group_by".
+        This hook deactivates (not deletes) those views so the module can be
+        installed/upgraded. The owning module can reactivate them afterwards.
+
+    ES: Desactiva TODAS las vistas dinámicas creadas en runtime por
+        solt_api_connector (patrón de nombre 'api.connector') ANTES de que se
+        cargue el XML de meli_oerp. solt_api_connector crea vistas heredadas
+        dinámicas (form, search, list) que referencian campos x_ (x_state_sync,
+        x_external_id, ...). Cuando esos campos faltan en los _fields del ORM,
+        el validador estricto de Odoo 19 falla al re-validar la vista compuesta
+        compartida con meli_oerp, lanzando:
+            ParseError: Campo desconocido "x_state_sync" en "group_by".
+        Este hook desactiva (no elimina) esas vistas para poder instalar/
+        actualizar el módulo. El módulo propietario puede reactivarlas después.
+    """
+    _logger.info(
+        "MELI pre_init_hook: deactivating solt_api_connector dynamic views "
+        "(name LIKE '%%api.connector%%') before XML loading..."
+    )
+    cr.execute("""
+        SELECT id, name, model, type
+        FROM ir_ui_view
+        WHERE active = true
+          AND name LIKE '%%api.connector%%'
+    """)
+    views = cr.fetchall()
+    if views:
+        for vid, vname, vmodel, vtype in views:
+            _logger.warning(
+                "MELI pre_init_hook: deactivating dynamic view id=%s "
+                "name='%s' model='%s' type='%s'",
+                vid, vname, vmodel, vtype,
+            )
+        cr.execute(
+            "UPDATE ir_ui_view SET active = false WHERE id IN %s",
+            (tuple(row[0] for row in views),),
+        )
+        _logger.info(
+            "MELI pre_init_hook: deactivated %d dynamic view(s). "
+            "Install/upgrade can proceed safely.",
+            len(views),
+        )
+    else:
+        _logger.info(
+            "MELI pre_init_hook: no solt_api_connector dynamic views found. "
+            "Proceeding normally."
+        )
 
 
 def post_init_hook(env_or_cr, registry=None):

@@ -4,6 +4,44 @@
 
 ---
 
+### 2026-08-06 — FIX-014: ParseError `x_state_sync en group_by` al actualizar meli_oerp con solt_tiendanube instalado `[19.0.testavelia]`
+
+**Origen:** ERROR-009 (`debug/errors-log.md`). Conflicto de **vistas compuestas** entre meli_oerp y
+solt_tiendanube/solt_api_connector sobre la misma vista padre.
+
+**Causa raíz:** `solt_api_connector.make_search_view()` crea en runtime una vista de búsqueda dinámica
+sobre `product.product_template_search_view` con `context="{'group_by':'x_state_sync'}"`. Al actualizar
+cualquier otro módulo que herede la misma vista padre (meli_oerp → `product_template_search_view_meli`),
+`ir.ui.view.write()` → `_check_xml()` corre con validación TOTAL del arch compuesto
+(`validate_view_ids=True`; la validación parcial `ir_ui_view_partial_validation` solo se activa en
+`create()`). Como `x_state_sync` no está en `product.template._fields`, el validador Odoo 19
+(`ir_ui_view.py:2177`) lanza ParseError y aborta el upgrade. El `__validate__="0"` de solt no protege
+contra esta validación total.
+
+**Fix (2 partes):**
+
+1. **Raíz — solt_api_connector** (`solt_api_connector/models/solt_api_meta_fields.py`):
+   `make_search_view()` ahora **solo crea el filtro `group_by` si el campo existe realmente en los
+   `_fields` del ORM** del modelo (`_state_field_exists_on_model()`). Previene que solt vuelva a
+   generar una vista que referencia un campo inexistente en `_fields` (aunque exista en
+   `ir.model.fields` manual). Bump `solt_api_connector` 19.0.1.1.1 → 19.0.1.1.2 + CHANGELOG.
+2. **Red de seguridad — meli_oerp** (v19.0.26.49):
+   - `pre_init_hook` (`__init__.py`): desactiva (`active=false`, SQL directo) todas las vistas activas
+     con `name LIKE '%api.connector%'` **antes** de cargar el XML → cubre install y upgrades.
+   - `migrations/19.0.26.49/pre-migrate.py`: misma desactivación antes del load de datos.
+   - `migrations/19.0.26.49/post-migrate.py`: reactivación (`active=true`, SQL directo — no dispara
+     `_check_xml`, no revuelve el ParseError).
+   - Bump manifest `19.0.26.48` → `19.0.26.49`.
+
+**Archivos:** `solt_tiendanube/solt_api_connector/models/solt_api_meta_fields.py`,
+`solt_tiendanube/solt_api_connector/__manifest__.py`, `solt_tiendanube/solt_api_connector/CHANGELOG.md`,
+`meli_oerp/__init__.py`, `meli_oerp/migrations/19.0.26.49/pre-migrate.py`,
+`meli_oerp/migrations/19.0.26.49/post-migrate.py`, `meli_oerp/__manifest__.py`.
+
+**Verificación:** `py_compile` OK en todos los archivos modificados. Falta: ejecutar Fase 0 (diagnóstico
+en testavelia) + upgrade real de solt (antes) y meli_oerp (después).
+
+---
 ### 30 jul 2026 - fix(orders): Odoo 16/17 nunca ejecutaban el guard de devolucion -> bucle infinito en ventas ML canceladas (v19.0.26.90) [Just 148]
 
 **Sintoma** (prod Just, cuenta 148, Odoo 16.0): desde que una orden ML se cancela DESPUES de facturada
