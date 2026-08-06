@@ -371,13 +371,13 @@
                                 class="oe_stat_button"
                                 icon="fa-refresh"
                 								invisible="meli_state == True or meli_category != False" />
-                            <button name='%(action_product_post)d' type="action"
+                            <button name='%(action_product_template_post)d' type="action"
                               string="Publicar"
                               title="Publicar producto en ML"
                               invisible="meli_state == True or meli_id != False"
                               class="oe_stat_button"
               								icon="fa-globe"/>
-                            <button name='%(action_product_post)d' type="action"
+                            <button name='%(action_product_template_post)d' type="action"
                               string="Actualizar"
                               title="Actualizar producto en ML"
                               invisible="meli_state == True or meli_id == False"

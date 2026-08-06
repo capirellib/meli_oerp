@@ -226,6 +226,9 @@ class product_post(models.TransientModel):
             if res and 'name' in res:
                 return res
 
+        if not res or 'name' not in res:
+            res = warningobj.info( title='MELI WARNING', message="Se intentaron publicar 0 productos. Debe forzar las publicaciones o marcar el producto con el campo Meli Publication, debajo del titulo.", message_html="" )
+
         return res
 
 

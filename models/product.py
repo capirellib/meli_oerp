@@ -4041,24 +4041,21 @@ class product_product(models.Model):
                 _logger.info("rjson:"+str(rjson))
 
         except Exception as E:
-            _logger.error("Exception"+str(E))
-            #rjson = { "error": str(E) }
-            pass;
-        #check response
-        # _logger.info( response )
-
+            _logger.error("Exception in _product_post: "+str(E), exc_info=True)
+            rjson = { "error": "exception", "status": 500, "message": str(E), "cause": [] }
 
         #check error
         if "error" in rjson:
-            #error_msg = '<h6>Mensaje de error de MercadoLibre: %s; status: %s </h6><h2>Mensaje: %s</h2><br/><h6>Cause: </h6> %s' % (rjson["error"], rjson["status"], rjson["message"], rjson["cause"])
-            error_msg = '<h6>Mensaje de error de MercadoLibre</h6><br/><h2>Mensaje: %s</h2><br/><h6>Status</h6> %s<br/><h6>Cause</h6> %s<br/><h6>Error completo:</h6><br/><span>%s</span><br/>' % (rjson["message"], rjson["status"], rjson["cause"], rjson["error"])
+            error_msg = '<h6>Mensaje de error de MercadoLibre</h6><br/><h2>Mensaje: %s</h2><br/><h6>Status</h6> %s<br/><h6>Cause</h6> %s<br/><h6>Error completo:</h6><br/><span>%s</span><br/>' % (rjson.get("message", ""), rjson.get("status", ""), rjson.get("cause", ""), rjson.get("error", ""))
             _logger.error(error_msg)
-            if (rjson["cause"] and rjson["cause"][0] and "message" in rjson["cause"][0]):
+            meli_message_post(product_tmpl, "Error publicando en MercadoLibre: " + str(rjson.get("message", rjson.get("error"))))
+            meli_message_post(product, "Error publicando en MercadoLibre: " + str(rjson.get("message", rjson.get("error"))))
+            if (rjson.get("cause") and len(rjson["cause"]) and isinstance(rjson["cause"][0], dict) and "message" in rjson["cause"][0]):
                 error_msg+= '<h3>'+str(rjson["cause"][0]["message"])+'</h3>'
             #expired token
-            if "message" in rjson and (rjson["error"]=="forbidden" or rjson["message"]=='invalid_token' or rjson["message"]=="expired_token"):
+            if "message" in rjson and (rjson.get("error")=="forbidden" or rjson.get("message")=='invalid_token' or rjson.get("message")=="expired_token"):
                 url_login_meli = meli.auth_url()
-                return warningobj.info( title='MELI WARNING', message="Debe iniciar sesión en MELI:  "+str(rjson["message"]), message_html="<br><br>"+error_msg, context= { "rjson": rjson })
+                return warningobj.info( title='MELI WARNING', message="Debe iniciar sesión en MELI: "+str(rjson.get("message")), message_html="<br><br>"+error_msg, context= { "rjson": rjson })
             else:
                  #Any other errors
                 return warningobj.info( title='MELI WARNING', message="Recuerde completar todos los campos y revise el mensaje siguiente.", message_html="<br><br>"+error_msg, context= { "rjson": rjson } )
@@ -4090,7 +4087,11 @@ class product_product(models.Model):
         if (force_meli_active==True):
             product.product_meli_status_active()
 
-        return {}
+        msg_success = "El producto '%s' fue publicado/actualizado con éxito en MercadoLibre. ID: %s" % (product.name, product.meli_id or '')
+        meli_message_post(product_tmpl, msg_success)
+        meli_message_post(product, msg_success)
+
+        return warningobj.info( title='MELI SUCCESS', message=msg_success, message_html="<h3>" + msg_success + "</h3>" )
 
     def _meli_available_quantity( self, meli=False, config=None ):
 
