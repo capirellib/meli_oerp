@@ -3637,6 +3637,58 @@ class product_product(models.Model):
         #_product_post_set_quantity
         product.meli_available_quantity = product._meli_available_quantity(meli=meli,config=config)
 
+        # Validaciones de requisitos mínimos para publicar en MercadoLibre (pre-flight checks)
+        if not product.meli_id:
+            validation_errors = []
+
+            # 1. Categoría de MercadoLibre
+            if not product.meli_category or not product.meli_category.meli_category_id or str(product.meli_category.meli_category_id).strip() in ['0', '']:
+                validation_errors.append("Debe seleccionar una Categoría de MercadoLibre válida en el producto.")
+
+            # 2. Título de MercadoLibre
+            title_str = (product.meli_title or product.name or '').strip()
+            if not title_str or len(title_str) < 10:
+                validation_errors.append("El Título del producto debe tener al menos 10 caracteres.")
+            elif len(title_str) > 60:
+                validation_errors.append("El Título del producto no puede superar los 60 caracteres (actual: %s)." % len(title_str))
+
+            # 3. Precio de Venta
+            try:
+                price_val = float(product.meli_price or 0.0)
+            except Exception:
+                price_val = 0.0
+            if price_val <= 0:
+                validation_errors.append("El precio del producto debe ser mayor a 0.")
+
+            # 4. Cantidad Disponible / Stock
+            try:
+                qty_val = float(product.meli_available_quantity or 0.0)
+            except Exception:
+                qty_val = 0.0
+            if qty_val <= 0:
+                validation_errors.append("La cantidad disponible (stock) debe ser de al menos 1 unidad.")
+
+            # 5. Tipo de Publicación
+            if not product.meli_listing_type or str(product.meli_listing_type).strip() in ['0', '']:
+                validation_errors.append("Debe seleccionar un Tipo de Publicación (ej: Clásica o Premium).")
+
+            # 6. Imagen Principal
+            first_img = get_first_image_to_publish(product)
+            if first_img is None:
+                validation_errors.append("Debe cargar al menos una imagen principal en el producto.")
+
+            if validation_errors:
+                error_html = "<ul class='text-danger'>" + "".join(["<li><b>%s</b></li>" % err for err in validation_errors]) + "</ul>"
+                error_text = "Faltan requisitos obligatorios para publicar en MercadoLibre:\n- " + "\n- ".join(validation_errors)
+                _logger.warning("VALIDACIÓN PRE-PUBLICACIÓN FALLÓ: " + error_text)
+                meli_message_post(product_tmpl, error_text)
+                meli_message_post(product, error_text)
+                return warningobj.info(
+                    title='REQUISITOS INCOMPLETOS EN MERCADOLIBRE',
+                    message=error_text,
+                    message_html="<h3>Revise los siguientes puntos antes de publicar:</h3>" + error_html
+                )
+
         #_product_post_set_body
         body = {
             "category_id": product.meli_category.meli_category_id or '0',
