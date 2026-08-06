@@ -2071,3 +2071,44 @@ msgstr "Historial de comunicación web"
 #: model:ir.model.fields,field_description:meli_oerp.field_mercadolibre_shipment__receiver_zip_code
 msgid "Zip Code"
 msgstr "Código Postal"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_scheduled_tasks
+msgid "Scheduled Tasks"
+msgstr "Tareas Programadas"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_all_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_all
+msgid "All Scheduled Tasks"
+msgstr "Todas las Tareas Programadas"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_post_products_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_post_products
+msgid "Post Products Cron"
+msgstr "Cron Publicar Productos"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_post_stock_rt_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_post_stock_rt
+msgid "Post Stock RT Cron"
+msgstr "Cron Stock Tiempo Real"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_get_products_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_get_products
+msgid "Get Products Cron"
+msgstr "Cron Importar Productos"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_post_price_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_post_price
+msgid "Post Price Cron"
+msgstr "Cron Actualizar Precios"
+
+#. module: meli_oerp
+#: model:ir.ui.menu,name:fix_meli_oerp.menu_meli_cron_get_state_item
+#: model:ir.actions.act_window,name:fix_meli_oerp.action_meli_cron_get_state
+msgid "Get Meli State Cron"
+msgstr "Cron Estado de MercadoLibre"
