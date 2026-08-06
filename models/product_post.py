@@ -19,7 +19,7 @@
 #
 ##############################################################################
 
-from odoo import fields, models, _
+from odoo import api, fields, models, _
 from odoo.tools.translate import _
 import pdb
 import logging
