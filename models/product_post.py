@@ -61,6 +61,36 @@ class product_template_post(models.TransientModel):
     action_pause = fields.Boolean(string="Pausar producto",help="No actualiza el producto completo, sólo pausa el producto",default=False)
 
 
+    @api.model
+    def default_get(self, fields_list):
+        res = super(product_template_post, self).default_get(fields_list)
+        res['force_meli_pub'] = True
+
+        ctx = self.env.context
+        active_ids = ctx.get('active_ids') or ([ctx.get('active_id')] if ctx.get('active_id') else [])
+        active_model = ctx.get('active_model') or 'product.template'
+
+        if active_ids:
+            if active_model == 'product.template':
+                products = self.env['product.template'].browse(active_ids)
+                has_variants = any(
+                    getattr(p, 'meli_pub_as_variant', False) or len(p.product_variant_ids) > 1 or len(p.attribute_line_ids) > 0
+                    for p in products
+                )
+                if has_variants:
+                    res['force_meli_variant'] = True
+            elif active_model == 'product.product':
+                variants = self.env['product.product'].browse(active_ids)
+                templates = variants.mapped('product_tmpl_id')
+                has_variants = any(
+                    getattr(p, 'meli_pub_as_variant', False) or len(p.product_variant_ids) > 1 or len(p.attribute_line_ids) > 0
+                    for p in templates
+                )
+                if has_variants:
+                    res['force_meli_variant'] = True
+
+        return res
+
     def pretty_json( self, data ):
         return json.dumps( data, sort_keys=False, indent=4 )
 

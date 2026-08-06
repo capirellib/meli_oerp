@@ -223,6 +223,15 @@ class product_template(models.Model):
         ret = {}
         posted_products = 0
         for product in self:
+            # Auto-enable variation publishing if product template has attributes/variants
+            if product.attribute_line_ids:
+                if not product.meli_pub_as_variant:
+                    _logger.info("Auto-enabling meli_pub_as_variant for product template: %s", product.name)
+                    product.meli_pub_as_variant = True
+                if not product.meli_pub_variant_attributes:
+                    _logger.info("Auto-populating meli_pub_variant_attributes for product template: %s", product.name)
+                    product.meli_pub_variant_attributes = [(6, 0, product.attribute_line_ids.ids)]
+
             if (product.meli_pub_as_variant):
                 _logger.info("Posting as variants")
                 #filtrar las variantes que tengan esos atributos que definimos
@@ -3523,17 +3532,20 @@ class product_product(models.Model):
         if product_tmpl.meli_warranty:
             product.meli_warranty=product_tmpl.meli_warranty
 
-        if (product_tmpl.meli_brand==False or len(product_tmpl.meli_brand)==0):
-            product_tmpl.meli_brand = ("product_brand_id" in product_tmpl._fields and product_tmpl.product_brand_id and product_tmpl.product_brand_id.id and product_tmpl.product_brand_id.name )
-        if product_tmpl.meli_brand == "wk.product.brand()" or product.meli_brand == "wk.product.brand()":
-            product_tmpl.meli_brand = ""
-            product.meli_brand = ""
-        if product.meli_brand==False or len(product.meli_brand)==0:
-            product.meli_brand = product_tmpl.meli_brand
+        raw_brand = ""
+        if "product_brand_id" in product_tmpl._fields and product_tmpl.product_brand_id:
+            raw_brand = str(product_tmpl.product_brand_id.name or "")
+        elif product_tmpl.meli_brand:
+            raw_brand = str(product_tmpl.meli_brand or "")
+
+        if not raw_brand or "product.brand" in raw_brand or raw_brand.endswith("()") or "solt." in raw_brand or "wk." in raw_brand:
+            raw_brand = "Genérica"
+
+        product_tmpl.meli_brand = raw_brand
+        product.meli_brand = raw_brand
+
         if product.meli_model==False or len(product.meli_model)==0:
             product.meli_model = product_tmpl.meli_model
-        if (product_tmpl.meli_brand):
-            product.meli_brand = product_tmpl.meli_brand
         if (product_tmpl.meli_model):
             product.meli_model = product_tmpl.meli_model
 
