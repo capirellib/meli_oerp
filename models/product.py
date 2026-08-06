@@ -119,8 +119,12 @@ class product_template(models.Model):
             if not product_tmpl.meli_pub:
                 continue
 
-            # Si ya está publicado con un meli_id activo, no publicamos alerta
-            if product_tmpl.meli_id:
+            # Si ya está publicado con un ML ID activo, no publicamos alerta
+            tmpl_meli_id = (
+                getattr(product_tmpl, 'meli_publications', False) or 
+                (hasattr(product_tmpl, 'product_variant_ids') and product_tmpl.product_variant_ids and product_tmpl.product_variant_ids[0].meli_id)
+            )
+            if tmpl_meli_id:
                 continue
 
             errors = []
