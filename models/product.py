@@ -223,12 +223,19 @@ class product_template(models.Model):
         ret = {}
         posted_products = 0
         for product in self:
-            # Auto-enable variation publishing if product template has attributes/variants
-            if product.attribute_line_ids:
+            force_variant_ctx = self.env.context.get("force_meli_variant", False)
+            has_variants_check = (
+                force_variant_ctx or
+                product.meli_pub_as_variant or
+                len(product.product_variant_ids) > 1 or
+                len(product.attribute_line_ids) > 0
+            )
+
+            if has_variants_check:
                 if not product.meli_pub_as_variant:
                     _logger.info("Auto-enabling meli_pub_as_variant for product template: %s", product.name)
                     product.meli_pub_as_variant = True
-                if not product.meli_pub_variant_attributes:
+                if not product.meli_pub_variant_attributes and product.attribute_line_ids:
                     _logger.info("Auto-populating meli_pub_variant_attributes for product template: %s", product.name)
                     product.meli_pub_variant_attributes = [(6, 0, product.attribute_line_ids.ids)]
 
@@ -4157,15 +4164,23 @@ class product_product(models.Model):
                 _logger.info("put rjson:"+str(rjson))
             else:
                 assign_img = True and product.meli_imagen_id
-                # MercadoLibre API Rule: If 'variations' is present in body:
+                # MercadoLibre API Rule: If 'variations' is present in body or product is published as variant:
                 # 'family_name' is forbidden and 'title' is required.
-                if body.get("variations"):
+                # For User Product Seller (UPS) accounts, root price and available_quantity are required.
+                if body.get("variations") or product_tmpl.meli_pub_as_variant or len(product_tmpl.product_variant_ids) > 1:
                     if "family_name" in body:
                         if "title" not in body or not body["title"]:
                             body["title"] = body["family_name"] or product.meli_title or product.name
                         del body["family_name"]
                     elif "title" not in body or not body["title"]:
                         body["title"] = product.meli_title or product.name
+
+                    if body.get("variations"):
+                        if "price" not in body or not body["price"]:
+                            body["price"] = str(body["variations"][0].get("price", "0"))
+                        if "available_quantity" not in body or body.get("available_quantity") is None:
+                            total_qty = sum(int(v.get("available_quantity", 0)) for v in body["variations"])
+                            body["available_quantity"] = total_qty
 
                 _logger.info("first post:" + str(body))
                 response = meli.post("/items", body, {'access_token':meli.access_token})
