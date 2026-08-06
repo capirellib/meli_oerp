@@ -113,6 +113,52 @@ class product_template(models.Model):
                 _logger.info("  supplier id=%s partner=%s price=%.2f",
                              s.id, s.partner_id.name, s.price)
 
+    def _check_and_post_meli_save_warnings(self):
+        """Valida y publica advertencias en el Chatter al guardar el producto si Publicación Meli está activa."""
+        for product_tmpl in self:
+            if not product_tmpl.meli_pub:
+                continue
+
+            # Si ya está publicado con un meli_id activo, no publicamos alerta
+            if product_tmpl.meli_id:
+                continue
+
+            errors = []
+            # 1. Categoría
+            if not product_tmpl.meli_category or not product_tmpl.meli_category.meli_category_id or str(product_tmpl.meli_category.meli_category_id).strip() in ['0', '']:
+                errors.append("Debe seleccionar una Categoría de MercadoLibre válida.")
+
+            # 2. Título
+            title_str = (product_tmpl.meli_title or product_tmpl.name or '').strip()
+            if not title_str or len(title_str) < 10:
+                errors.append("El Título del producto debe tener al menos 10 caracteres.")
+            elif len(title_str) > 60:
+                errors.append("El Título del producto no puede superar los 60 caracteres.")
+
+            # 3. Precio
+            try:
+                price_val = float(product_tmpl.meli_price or 0.0)
+            except Exception:
+                price_val = 0.0
+            if price_val <= 0:
+                errors.append("El precio del producto debe ser mayor a 0.")
+
+            # 4. Tipo de Publicación
+            if not product_tmpl.meli_listing_type or str(product_tmpl.meli_listing_type).strip() in ['0', '']:
+                errors.append("Debe seleccionar un Tipo de Publicación (ej: Clásica o Premium).")
+
+            # 5. Imagen
+            first_img = get_first_image_to_publish(product_tmpl.product_variant_ids[0] if product_tmpl.product_variant_ids else product_tmpl)
+            if first_img is None:
+                errors.append("Debe cargar al menos una imagen principal en el producto.")
+
+            if errors:
+                msg = "⚠️ <b>ATENCIÓN MERCADOLIBRE</b>: El producto fue guardado con la opción 'Publicación Meli' activa, pero faltan los siguientes requisitos para poder publicarse:\n<ul>" + "".join(["<li>%s</li>" % e for e in errors]) + "</ul>"
+                try:
+                    meli_message_post(product_tmpl, msg)
+                except Exception as E:
+                    _logger.warning("Could not post save warning to Chatter: %s", E)
+
     def write(self, vals):
         """Protect variant_seller_ids from unintended destructive writes.
 
@@ -138,7 +184,9 @@ class product_template(models.Model):
                         field_name, self.ids, cmds,
                     )
                     del vals[field_name]
-        return super().write(vals)
+        res = super().write(vals)
+        self._check_and_post_meli_save_warnings()
+        return res
 
     def delete_image_product_now(self):
         for record in self:
@@ -4009,6 +4057,12 @@ class product_product(models.Model):
                             import pprint
                             formatted_json_str = pprint.pformat(body["variations"])
                             _logger.info("body_varias (N var):"+str(formatted_json_str))
+
+                            # MercadoLibre API constraint: variations products require 'title' and forbid 'family_name'
+                            if "family_name" in body:
+                                body["title"] = body.pop("family_name", None) or product.meli_title or product.name
+                            elif "title" not in body or not body["title"]:
+                                body["title"] = product.meli_title or product.name
                         #del body['price']
                         del body['available_quantity']
                         del body['price']
@@ -4087,6 +4141,16 @@ class product_product(models.Model):
                 _logger.info("put rjson:"+str(rjson))
             else:
                 assign_img = True and product.meli_imagen_id
+                # MercadoLibre API Rule: If 'variations' is present in body:
+                # 'family_name' is forbidden and 'title' is required.
+                if body.get("variations"):
+                    if "family_name" in body:
+                        if "title" not in body or not body["title"]:
+                            body["title"] = body["family_name"] or product.meli_title or product.name
+                        del body["family_name"]
+                    elif "title" not in body or not body["title"]:
+                        body["title"] = product.meli_title or product.name
+
                 _logger.info("first post:" + str(body))
                 response = meli.post("/items", body, {'access_token':meli.access_token})
                 rjson = response.json()
