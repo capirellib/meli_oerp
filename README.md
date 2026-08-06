@@ -1,9 +1,10 @@
-# meli_oerp 12324565 **\*\*\***
+meli_oerp
+=========
 
 Módulo para sincronizar MercadoLibre con Odoo.
 
 Para que funcione correctamente se debe tener instalado Odoo Community o Enterprise, en modo HTTPS (443).
-Y no modificar el nombre de la carpeta del módulo: "meli_oerp" ( Meli Open ERP, Open ERP era como se llamaba antes el Odoo )
+Y no modificar el nombre de la carpeta del módulo: "meli_oerp"  ( Meli Open ERP, Open ERP era como se llamaba antes el Odoo )
 
 Ver http://applications.mercadolibre.com.ar para obtener el client_id (app_id), y el secret key, para obtener el owner_id (vendor id), simplemente se hace un curl -X GET https://api.mercadolibre.com/applications/{app_id} , que devuelve la info de la app y del owner.
 
@@ -27,7 +28,6 @@ Para Brasil: https://api.mercadolibre.com/sites/MLB/search?nickname=ESCRIBE_AQUI
 Ver http://developers.mercadolibre.com.ar para ver la API.
 
 Ver los códigos de categoría aquí:
-
 - MLA (Argentina): https://api.mercadolibre.com/sites/MLA/categories
 - MLB (Brasil): https://api.mercadolibre.com/sites/MLB/categories
 - MLC (Chile): https://api.mercadolibre.com/sites/MLC/categories
@@ -60,6 +60,8 @@ Utilizar como <b>redirect_uri</b> el valor de: https://[dominio del server]/meli
 <h4>5. Pueden ver el video en el link siguiente</h4>
 <a href="https://www.moldeointeractive.com.ar/shop/product/instalacion-modulo-odoo-mercadolibre-18">Video + Info</a>
 
+
 <h2>Authors</h2>
 <h4>Original Author and Development Lead</h4>
 <h5>Fabricio Costa (fabricio.costa(at)moldeointeractive.com.ar)</h5>
+

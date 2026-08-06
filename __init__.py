@@ -14,81 +14,8 @@ _logger = logging.getLogger(__name__)
 
 
 def pre_init_hook(cr):
-    """Pre-init hook — deactivate orphaned dynamic views before XML loading.
-
-    EN: Other modules (e.g. solt_api_connector) create dynamic inherited views
-        at runtime that inject filters with group_by referencing custom fields
-        like x_state_sync into the product.template search view. When those
-        modules are partially uninstalled or the custom field is removed, the
-        orphaned view stays in the database. Since meli_oerp also inherits from
-        the same parent view, Odoo re-validates the entire composed view tree
-        during upgrade and crashes with ParseError on the missing field.
-
-        This hook deactivates (not deletes) those orphaned views BEFORE
-        meli_oerp's XML data is loaded, preventing the validation crash.
-        The owning module can reactivate them if reinstalled.
-
-    ES: Otros módulos (ej: solt_api_connector) crean vistas heredadas dinámicas
-        en tiempo de ejecución que inyectan filtros con group_by referenciando
-        campos personalizados como x_state_sync en la vista de búsqueda de
-        product.template. Cuando esos módulos se desinstalan parcialmente o el
-        campo personalizado se elimina, la vista huérfana permanece en la BD.
-        Como meli_oerp también hereda de la misma vista padre, Odoo re-valida
-        todo el árbol de vistas compuestas durante la actualización y falla con
-        ParseError por el campo faltante.
-
-        Este hook desactiva (no elimina) esas vistas huérfanas ANTES de que se
-        carguen los datos XML de meli_oerp, previniendo el crash de validación.
-        El módulo propietario puede reactivarlas si se reinstala.
-    """
-    _logger.info(
-        "MELI pre_init_hook: checking for orphaned dynamic views "
-        "that could block upgrade..."
-    )
-
-    # --- Find dynamic search views from solt_api_connector referencing x_state_sync ---
-    # --- Buscar vistas de búsqueda dinámicas de solt_api_connector que referencien x_state_sync ---
-    # EN: We deactivate views by name pattern ('api.connector') rather than
-    #     checking if the field exists in ir_model_fields, because Odoo 19's
-    #     strict view validator may reject the field even when it exists in the
-    #     DB (registry timing issue during module graph loading).
-    # ES: Desactivamos vistas por patrón de nombre ('api.connector') en lugar de
-    #     verificar si el campo existe en ir_model_fields, porque el validador
-    #     estricto de vistas de Odoo 19 puede rechazar el campo incluso cuando
-    #     existe en la BD (problema de timing del registro durante la carga).
-    cr.execute("""
-        SELECT v.id, v.name, v.model
-        FROM ir_ui_view v
-        WHERE v.active = true
-          AND v.arch_db::text LIKE '%%x_state_sync%%'
-          AND v.type = 'search'
-          AND v.name LIKE '%%api.connector%%'
-    """)
-    orphaned_views = cr.fetchall()
-
-    if orphaned_views:
-        view_ids = [row[0] for row in orphaned_views]
-        for vid, vname, vmodel in orphaned_views:
-            _logger.warning(
-                "MELI pre_init_hook: deactivating orphaned view id=%s "
-                "name='%s' model='%s' (references x_state_sync but field "
-                "does not exist on the model)",
-                vid, vname, vmodel,
-            )
-        cr.execute(
-            "UPDATE ir_ui_view SET active = false WHERE id IN %s",
-            (tuple(view_ids),),
-        )
-        _logger.info(
-            "MELI pre_init_hook: deactivated %d orphaned view(s). "
-            "Upgrade can proceed safely.",
-            len(view_ids),
-        )
-    else:
-        _logger.info(
-            "MELI pre_init_hook: no orphaned dynamic views found. "
-            "Proceeding normally."
-        )
+    """Pre-init hook compatible with Odoo 14-19"""
+    pass
 
 
 def post_init_hook(env_or_cr, registry=None):
