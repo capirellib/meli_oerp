@@ -1402,11 +1402,20 @@ class res_company(models.Model):
                             warning = self.env["meli.warning"].browse(res["res_id"])
                             if (warning):
                                 ret_messages.append( { 'obj': obj, 'message': str(warning.message)  } )
+                                msg_cron = "⚠️ <b>ERROR DE PUBLICACIÓN DESDE CRON</b>:<br/>" + str(warning.message)
+                                try:
+                                    meli_message_post(obj, msg_cron)
+                                except Exception as E:
+                                    _logger.warning("Could not post cron error to Chatter: %s", E)
 
                 except Exception as e:
                     _logger.info("product_meli_update_remote_products > Exception founded!")
                     _logger.info(e, exc_info=True)
-                    pass;
+                    msg_exception = "⚠️ <b>EXCEPCIÓN EN CRON DE PUBLICACIÓN</b>:<br/>" + str(e)
+                    try:
+                        meli_message_post(obj, msg_exception)
+                    except Exception as E:
+                        pass
 
         self.meli_send_report( ret_messages )
 
