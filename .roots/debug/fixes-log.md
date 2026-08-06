@@ -29,8 +29,13 @@ contra esta validación total.
    - `pre_init_hook` (`__init__.py`): desactiva (`active=false`, SQL directo) todas las vistas activas
      con `name LIKE '%api.connector%'` **antes** de cargar el XML → cubre install y upgrades.
    - `migrations/19.0.26.49/pre-migrate.py`: misma desactivación antes del load de datos.
-   - `migrations/19.0.26.49/post-migrate.py`: reactivación (`active=true`, SQL directo — no dispara
-     `_check_xml`, no revuelve el ParseError).
+   - `migrations/19.0.26.49/post-migrate.py`: **regenera las vistas de búsqueda de solt vía
+     `make_search_view()`** (purga el filtro `group_by: x_state_sync` de product.template usando el
+     guard nuevo de solt 19.0.1.1.2) y luego reactiva (`active=true`, SQL directo — no dispara
+     `_check_xml`). La regeneración hace el fix **duradero**: la vista reactivada ya no referencia
+     `x_state_sync`, por lo que el próximo upgrade de cualquier módulo que comparta la vista padre no
+     vuelve a romperse. `make_views()` de solt NO corre al actualizar solt, por eso la purga se hace
+     desde meli.
    - Bump manifest `19.0.26.48` → `19.0.26.49`.
 
 **Archivos:** `solt_tiendanube/solt_api_connector/models/solt_api_meta_fields.py`,
