@@ -1,5 +1,4 @@
-meli_oerp **\*\*\***
-=========
+# meli_oerp 12324565 **\*\*\***
 
 Módulo para sincronizar MercadoLibre con Odoo.
 
