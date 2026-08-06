@@ -16,14 +16,17 @@ _logger = logging.getLogger(__name__)
 meli_errors = {
     "validation_error": "Hemos encontrado errores de validación",
     "item.category_id.invalid": "Categoría de MercadoLibre inválida, seleccione una categoría en la plantilla de MercadoLibre",
-    #"item.category_id.invalid": "Categoría de MercadoLibre inválida, seleccione una categoría en la plantilla de MercadoLibre",
     "item.attributes.missing_required": "Un atributo faltante es requerido.",
     "item.price.invalid": "El precio no es válido, requiere un mínimo.",
     "item.description.ignored": "La descripción fue ignorada",
     "shipping.free_shipping.cost_exceeded": "El costo del envío supera al precio de venta.",
     "no image to upload": "Falta cargar una imagen en el producto",
     "item.image.required": "Imagen requerida para publicar el producto",
-    "body.invalid_field_types": "Tipo de valor de propiedad de campo inválido (revisar términos de venta, garantia, etc...)"
+    "body.invalid_field_types": "Tipo de valor de propiedad de campo inválido (revisar términos de venta, garantía, etc.)",
+    "body.required_fields": "Campos obligatorios faltantes",
+    "body.invalid_fields": "Campos o atributos no válidos para el tipo de publicación seleccionado",
+    "The field variations is invalid with family name": "Incompatibilidad: Al publicar variantes, no debe enviarse el nombre de familia (marque la opción 'Publicar como variante' en el asistente).",
+    "The body does not contains some or none of the following properties [price, available_quantity]": "Falta especificar el precio o la cantidad disponible (stock) en las variantes del producto.",
 }
 
 
@@ -122,16 +125,17 @@ class warning(models.TransientModel):
                                     ecamess = str(eca)
 
                                 ecacodemess = (ecacode in meli_errors and meli_errors[ecacode]) or ecacode
+                                ecamess_trans = (ecamess in meli_errors and meli_errors[ecamess]) or ecamess
                                 ecaalertstatus = (ecatype in ["error"] and "danger" ) or ecatype
                                 ecatypeicon = (ecatype in ["error"] and "times-circle" ) or ecatype
 
                                 # acumular para el texto plano del mensaje principal
                                 if ecamess:
                                     _icon = "✗" if ecatype == "error" else "⚠"
-                                    _cause_messages.append("%s %s" % (_icon, ecamess))
+                                    _cause_messages.append("%s %s" % (_icon, ecamess_trans))
 
                                 ecacodemess = "<strong>"+str(ecacodemess)+"</strong><br/>"
-                                ecacodemess+= str(ecamess)
+                                ecacodemess+= str(ecamess_trans)
                                 message_html+= '<div role="alert" class="alert alert-'+str(ecaalertstatus)+'" title="Meli Message, Code: '+str(ecacode)+'"><i class="fa fa-'+str(ecatypeicon)+'" role="img" aria-label="Meli Message"/> %s </div>' % (str(ecacodemess))
 
                 # Si hay mensajes de causa, mostrarlos claramente como texto principal
@@ -156,12 +160,13 @@ class warning(models.TransientModel):
                             ecacode = ""
                             ecamess = str(eca)
                         ecacodemess = (ecacode in meli_errors and meli_errors[ecacode]) or ecacode
+                        ecamess_trans = (ecamess in meli_errors and meli_errors[ecamess]) or ecamess
                         ecaalertstatus = "danger" if ecatype == "error" else ecatype
                         ecatypeicon = "times-circle" if ecatype == "error" else ecatype
                         if ecamess:
                             _icon = "✗" if ecatype == "error" else "⚠"
-                            _cause_messages.append("%s %s" % (_icon, ecamess))
-                        ecacodemess_html = "<strong>"+str(ecacodemess)+"</strong><br/>"+str(ecamess)
+                            _cause_messages.append("%s %s" % (_icon, ecamess_trans))
+                        ecacodemess_html = "<strong>"+str(ecacodemess)+"</strong><br/>"+str(ecamess_trans)
                         message_html += '<div role="alert" class="alert alert-'+str(ecaalertstatus)+'" title="Meli Message, Code: '+str(ecacode)+'"><i class="fa fa-'+str(ecatypeicon)+'" role="img" aria-label="Meli Message"/> %s </div>' % ecacodemess_html
                     if _cause_messages:
                         message = "\n".join(_cause_messages)
@@ -170,7 +175,6 @@ class warning(models.TransientModel):
 
                         #message_html+= "<br/>Causa: "+str(ecause)
 
-                #message_html+= '<br/><button click="alert(%s)"><i class="fa fa-copy"></i>Copy Error</button>'
 
 
 
