@@ -234,7 +234,9 @@ class product_post(models.TransientModel):
         res = {}
         for product_id in product_ids:
             product = product_obj.browse(product_id)
-            #import pdb;pdb.set_trace();
+            if not product.exists():
+                _logger.warning("[ML Product Post] Skipping unexisting product ID: %s", product_id)
+                continue
             if (self.force_meli_pub and not product.meli_pub):
                 product.meli_pub = True
 

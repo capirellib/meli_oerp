@@ -1877,18 +1877,24 @@ class product_product(models.Model):
             })
 
         if new_lines_vals:
-            commands = [(5, 0, 0)]  # limpiar líneas actuales
+            existing_lines_by_attr = {line.attribute_id.id: line for line in product_template.attribute_line_ids}
+            commands = []
+            processed_line_ids = set()
 
             for line_vals in new_lines_vals:
-                commands.append((
-                    0, 0, {
-                        'attribute_id': line_vals['attribute_id'],
-                        'value_ids': [(6, 0, line_vals['value_ids'])],
-                        # Ojo: ya no pasamos create_variant aquí
-                    }
-                ))
+                att_id = line_vals['attribute_id']
+                val_ids = line_vals['value_ids']
+                if att_id in existing_lines_by_attr:
+                    line = existing_lines_by_attr[att_id]
+                    commands.append((1, line.id, {'value_ids': [(6, 0, val_ids)]}))
+                    processed_line_ids.add(line.id)
+                else:
+                    commands.append((0, 0, {
+                        'attribute_id': att_id,
+                        'value_ids': [(6, 0, val_ids)],
+                    }))
 
-            _logger.info("_get_variations: writing attribute_line_ids in one shot: %s", new_lines_vals)
+            _logger.info("_get_variations: writing attribute_line_ids incrementally: %s", new_lines_vals)
 
             product_template.write({'attribute_line_ids': commands})
 
