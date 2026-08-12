@@ -3951,7 +3951,7 @@ class product_product(models.Model):
                     #esta es la variante principal, si aun el producto no se publico
                     #preparamos las variantes
                     #_logger.info("productjson:"+str(productjson))
-                    if ( productjson and len(productjson["variations"]) ):
+                    if ( productjson and "variations" in productjson and len(productjson["variations"]) ):
                         #ya hay variantes publicadas en ML
                         varias = {
                             "title": body["title"],
@@ -4098,7 +4098,7 @@ class product_product(models.Model):
                 _logger.debug("Variant principal not defined yet. Cannot post.")
                 return {}
         else:
-            if ( productjson and len(productjson["variations"])==1 ):
+            if ( productjson and "variations" in productjson and len(productjson["variations"])==1 ):
                 varias = {
                     "title": body["title"],
                     "pictures": body["pictures"],
